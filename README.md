@@ -22,8 +22,52 @@ desertation_fake_news/
 │   └── config.py        # Configuration settings
 ├── requirements.txt     # Python dependencies
 ├── start_server.py     # Server startup script
+├── Makefile           # Build automation (macOS/Linux)
+├── make.bat           # Build automation (Windows)
 ├── env.example         # Environment configuration template
 └── README.md
+```
+
+## Prerequisites
+
+### Operating System Setup
+
+#### Windows
+- **Python**: Download from [python.org](https://www.python.org/downloads/) (3.8+)
+- **Make** (Optional): Install via winget: `winget install GnuWin32.Make`
+- **Alternative**: Use the included `make.bat` file (recommended for Windows)
+
+#### macOS
+- **Python**: Install via Homebrew: `brew install python` or download from [python.org](https://www.python.org/downloads/)
+- **Make**: Usually pre-installed. If not: `xcode-select --install`
+- **Homebrew** (if not installed): `/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"`
+
+#### Linux (Ubuntu/Debian)
+```bash
+sudo apt update
+sudo apt install python3 python3-pip python3-venv make
+```
+
+#### Linux (CentOS/RHEL/Fedora)
+```bash
+sudo yum install python3 python3-pip make
+# or for newer versions:
+sudo dnf install python3 python3-pip make
+```
+
+### Install uv (Recommended Package Manager)
+
+uv is a fast Python package installer and resolver. Install it on any OS:
+
+```bash
+# Using pip
+pip install uv
+
+# Using curl (macOS/Linux)
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Using PowerShell (Windows)
+powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
 ```
 
 ## Quick Start
@@ -83,6 +127,88 @@ desertation_fake_news/
    - **Main API**: http://localhost:8000
    - **Interactive Docs**: http://localhost:8000/docs
    - **ReDoc Documentation**: http://localhost:8000/redoc
+
+## Build Automation
+
+### Using Makefile (macOS/Linux)
+
+The project includes a Makefile for common development tasks:
+
+```bash
+# See all available commands
+make help
+
+# Install dependencies
+make install          # Basic dependencies
+make install-dev      # With dev dependencies  
+make install-ml       # With ML dependencies
+
+# Development tasks
+make run              # Start the server
+make format           # Format code with black
+make lint             # Check code with ruff
+make test             # Run tests
+make clean            # Clean up temporary files
+```
+
+### Using make.bat (Windows)
+
+For Windows users, use the included batch file:
+
+```cmd
+# See all available commands
+make.bat
+
+# Install dependencies
+make.bat install          # Basic dependencies
+make.bat install-dev      # With dev dependencies  
+make.bat install-ml       # With ML dependencies
+
+# Development tasks
+make.bat run              # Start the server
+make.bat format           # Format code with black
+make.bat lint             # Check code with ruff
+make.bat test             # Run tests
+make.bat clean            # Clean up temporary files
+```
+
+### Make Installation by OS
+
+#### Windows
+```cmd
+# Using winget (recommended)
+winget install GnuWin32.Make
+
+# Using Chocolatey
+choco install make
+
+# Using the full path after installation
+"C:\Program Files (x86)\GnuWin32\bin\make.exe" help
+```
+
+#### macOS
+```bash
+# Usually pre-installed, but if not:
+xcode-select --install
+
+# Or using Homebrew
+brew install make
+```
+
+#### Linux (Ubuntu/Debian)
+```bash
+sudo apt update
+sudo apt install make
+```
+
+#### Linux (CentOS/RHEL/Fedora)
+```bash
+# CentOS/RHEL
+sudo yum install make
+
+# Fedora
+sudo dnf install make
+```
 
 ## API Endpoints
 
@@ -234,10 +360,9 @@ uv pip install --upgrade-strategy eager --upgrade .
 uv pip freeze > requirements-lock.txt
 ```
 
-### Using Makefile (Recommended)
+### Cross-Platform Development Workflow
 
-For easier development workflow, use the included Makefile:
-
+#### Using Makefile (macOS/Linux)
 ```bash
 # See all available commands
 make help
@@ -253,6 +378,24 @@ make format           # Format code with black
 make lint             # Check code with ruff
 make test             # Run tests
 make clean            # Clean up temporary files
+```
+
+#### Using make.bat (Windows)
+```cmd
+# See all available commands
+make.bat
+
+# Install dependencies
+make.bat install          # Basic dependencies
+make.bat install-dev      # With dev dependencies  
+make.bat install-ml       # With ML dependencies
+
+# Development tasks
+make.bat run              # Start the server
+make.bat format           # Format code with black
+make.bat lint             # Check code with ruff
+make.bat test             # Run tests
+make.bat clean            # Clean up temporary files
 ```
 
 ### Adding New Data Sources
@@ -286,6 +429,30 @@ docker run -p 8000:8000 fake-news-detector
 - Use Redis for background task queue
 - Add caching for repeated requests
 
+## Troubleshooting
+
+### Common Issues
+
+#### Windows
+- **"make is not recognized"**: Use `make.bat` instead or install make via winget
+- **Python not found**: Add Python to PATH during installation
+- **Permission errors**: Run Command Prompt as Administrator
+
+#### macOS
+- **"make: command not found"**: Install Xcode Command Line Tools: `xcode-select --install`
+- **Python version issues**: Use pyenv or Homebrew Python
+
+#### Linux
+- **Package not found**: Update package lists: `sudo apt update` (Ubuntu) or `sudo yum update` (CentOS)
+- **Permission denied**: Use `sudo` for system-wide installations
+
+### Getting Help
+
+1. Check the [uv documentation](https://docs.astral.sh/uv/)
+2. Review [FastAPI documentation](https://fastapi.tiangolo.com/)
+3. Check your Python version: `python --version`
+4. Verify uv installation: `uv --version`
+
 ## Next Steps
 
 Based on your pilot study requirements:
@@ -312,3 +479,58 @@ Based on your pilot study requirements:
 ## License
 
 This project is part of a dissertation research on fake news detection.
+
+## Step-by-Step Guide: Setting Up and Using the Backend
+
+### 1. Obtain Required API Keys
+
+- **NewsAPI**: Register at [newsapi.org](https://newsapi.org/register) and get your API key.
+- **Twitter API** (optional, for future social media support): Apply at [developer.twitter.com](https://developer.twitter.com/en/portal/dashboard) and create a project/app to get your Bearer Token.
+- Place your API keys in a `.env` file (see `env.example`). Example:
+  ```env
+  NEWSAPI_KEY=your_newsapi_key_here
+  TWITTER_BEARER_TOKEN=your_twitter_token_here
+  ```
+
+### 2. Start the Backend and Access Swagger UI
+
+- Install dependencies (see earlier sections for `uv` or `pip` instructions).
+- Start the server:
+  ```bash
+  python start_server.py
+  # or
+  uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+  ```
+- Open your browser and go to [http://localhost:8000/docs](http://localhost:8000/docs) to access the Swagger UI (interactive API documentation).
+
+### 3. Gather News from All Sources
+
+- (Optional) Add or activate sources using the `/sources` POST endpoint if you want to add more feeds/APIs.
+- Trigger data gathering from all sources:
+  ```bash
+  curl -X POST "http://localhost:8000/gather"
+  ```
+- Or gather from a single source (replace `"BBC RSS"` with your source name):
+  ```bash
+  curl -X POST "http://localhost:8000/gather/single" -H "Content-Type: application/json" -d '"BBC RSS"'
+  ```
+
+### 4. Check if News is Stored
+
+- List all articles:
+  ```bash
+  curl -X GET "http://localhost:8000/articles"
+  ```
+- Filter by source:
+  ```bash
+  curl -X GET "http://localhost:8000/articles?source=BBC%20RSS"
+  ```
+- Check the count:
+  ```bash
+  curl -X GET "http://localhost:8000/articles/count"
+  ```
+
+### 5. News Persistence
+
+- All gathered news articles are now also saved in a file called `articles.json` in the project root.
+- You can open this file to view all stored articles, or reload them if you restart the backend (future enhancement).

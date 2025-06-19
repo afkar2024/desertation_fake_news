@@ -63,9 +63,10 @@ data_sources_db: List[DataSource] = []
 
 # Utility functions
 def save_article(article: NewsArticle):
-    """Save article to storage"""
     articles_db.append(article)
-    # In production, save to database
+    # Persist all articles to a JSON file for later retrieval
+    with open("articles.json", "w", encoding="utf-8") as f:
+        json.dump([a.dict() for a in articles_db], f, default=str, ensure_ascii=False, indent=2)
     print(f"Saved article: {article.title[:50]}...")
 
 async def fetch_from_api(source: DataSource) -> List[NewsArticle]:
