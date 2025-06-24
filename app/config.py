@@ -3,11 +3,13 @@ Configuration settings for the Fake News Detector API
 """
 import os
 from typing import Optional
-from pydantic import BaseSettings
+from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
     """Application settings loaded from environment variables"""
     
+    reload: bool = True
+
     # API Configuration
     app_name: str = "Adaptive Fake News Detector"
     app_version: str = "1.0.0"

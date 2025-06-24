@@ -8,6 +8,8 @@ from datetime import datetime, timedelta
 import json
 import uuid
 from pathlib import Path
+from app.config import settings
+from pydantic_settings import BaseSettings
 
 # Data models
 class NewsArticle(BaseModel):
@@ -354,8 +356,8 @@ async def startup_event():
             name="NewsAPI General",
             type="api",
             url="https://newsapi.org/v2/top-headlines?country=us&category=general",
-            api_key=None,  # Add your NewsAPI key here
-            is_active=False  # Set to True when you have an API key
+            api_key=settings.newsapi_key,
+            is_active=bool(settings.newsapi_key)
         ),
         DataSource(
             name="BBC RSS",
