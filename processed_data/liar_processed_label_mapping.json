@@ -1,0 +1,8 @@
+{
+  "barely-true": 0,
+  "false": 1,
+  "half-true": 2,
+  "mostly-true": 3,
+  "pants-fire": 4,
+  "true": 5
+}

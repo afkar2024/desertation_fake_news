@@ -40,7 +40,7 @@ class Settings(BaseSettings):
     requests_per_minute: int = 60
     
     # Logging
-    log_level: str = "INFO"
+    log_level: str = "info"
     log_file: Optional[str] = None
     
     class Config:

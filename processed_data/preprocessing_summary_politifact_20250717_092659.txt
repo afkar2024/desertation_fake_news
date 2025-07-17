@@ -1,0 +1,24 @@
+PREPROCESSING REPORT - POLITIFACT
+==================================================
+
+Generated: 2025-07-17 09:26:59
+
+DATASET OVERVIEW:
+  Original shape: (100, 8)
+  Processed shape: (100, 33)
+  Features added: 25
+
+LABEL DISTRIBUTION:
+  true: 17
+  mostly-true: 17
+  half-true: 17
+  mostly-false: 17
+  false: 16
+  pants-fire: 16
+
+FEATURE ANALYSIS:
+  Readability:
+    Flesch-Kincaid Grade: 13.10 ± 0.00
+  Sentiment:
+    Polarity: 0.000 ± 0.000
+    Subjectivity: 0.100 ± 0.000

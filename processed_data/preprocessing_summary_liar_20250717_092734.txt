@@ -1,0 +1,24 @@
+PREPROCESSING REPORT - LIAR
+==================================================
+
+Generated: 2025-07-17 09:27:34
+
+DATASET OVERVIEW:
+  Original shape: (12791, 15)
+  Processed shape: (12791, 40)
+  Features added: 25
+
+LABEL DISTRIBUTION:
+  half-true: 2627
+  false: 2507
+  mostly-true: 2454
+  barely-true: 2103
+  true: 2053
+  pants-fire: 1047
+
+FEATURE ANALYSIS:
+  Readability:
+    Flesch-Kincaid Grade: 8.35 ± 3.64
+  Sentiment:
+    Polarity: 0.050 ± 0.211
+    Subjectivity: 0.266 ± 0.274
