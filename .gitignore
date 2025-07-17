@@ -3,3 +3,5 @@
 *.pyc
 app/__pycache__
 .env
+datasets/liar/liar_dataset.zip
+processed_data/*.csv
