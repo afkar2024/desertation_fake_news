@@ -34,3 +34,11 @@ redis==5.0.1
 pandas==2.1.3
 numpy==1.24.4
 python-dateutil==2.8.2
+
+# New dependencies for dataset management and preprocessing
+nltk==3.8.1
+textstat==0.7.3
+textblob==0.17.1
+transformers==4.35.2
+scikit-learn==1.3.2
+torch==2.1.1

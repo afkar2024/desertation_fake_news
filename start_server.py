@@ -5,7 +5,14 @@ Startup script for the Adaptive Fake News Detector API
 import uvicorn
 import os
 import sys
+import warnings
 from pathlib import Path
+
+# Suppress known deprecation warnings
+warnings.filterwarnings("ignore", category=UserWarning, module="textstat")
+warnings.filterwarnings("ignore", category=FutureWarning, module="huggingface_hub")
+warnings.filterwarnings("ignore", message="pkg_resources is deprecated")
+warnings.filterwarnings("ignore", message="resume_download is deprecated")
 
 def main():
     """Start the FastAPI server"""
@@ -22,7 +29,7 @@ def main():
     # Get configuration from environment
     host = os.getenv("HOST", "0.0.0.0")
     port = int(os.getenv("PORT", 8000))
-    log_level = os.getenv("LOG_LEVEL", "info")
+    log_level = os.getenv("LOG_LEVEL", "info").lower()  # Ensure lowercase for uvicorn
     reload = os.getenv("RELOAD", "true").lower() == "true"
     
     print("=" * 60)
@@ -41,14 +48,18 @@ def main():
     else:
         print("⚠️  No .env file found - using default settings")
         print("💡 Create a .env file to configure API keys and settings")
-    
+    NEWSAPI_KEY = os.getenv("NEWSAPI_KEY")
+    TWITTER_BEARER_TOKEN = os.getenv("TWITTER_BEARER_TOKEN")
+    # show the keys partially to avoid logging the full key
+    print(f"   NEWSAPI_KEY={NEWSAPI_KEY[:5]}...{NEWSAPI_KEY[-5:]}")
+    print(f"   TWITTER_BEARER_TOKEN={TWITTER_BEARER_TOKEN[:5]}...{TWITTER_BEARER_TOKEN[-5:]}")
     print()
     print("🔑 To add API keys, create a .env file with:")
-    print("   NEWSAPI_KEY=your_newsapi_key_here")
-    print("   TWITTER_BEARER_TOKEN=your_twitter_token_here")
     print()
     
     try:
+        print(f"🔧 Starting server with log_level: {log_level}")
+        
         # Start the server
         uvicorn.run(
             "app.main:app",
@@ -62,6 +73,7 @@ def main():
         print("\n👋 Server stopped gracefully")
     except Exception as e:
         print(f"❌ Error starting server: {e}")
+        print(f"🔍 Debug info - log_level: '{log_level}', host: '{host}', port: {port}")
         sys.exit(1)
 
 if __name__ == "__main__":

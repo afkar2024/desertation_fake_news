@@ -1,0 +1,26 @@
+{
+  "download_report": {
+    "timestamp": "2025-07-17T09:27:15.442590",
+    "summary": {
+      "total_datasets": 1,
+      "successful_downloads": 1,
+      "failed_downloads": 0
+    },
+    "datasets": {
+      "liar": {
+        "success": true,
+        "info": {
+          "downloaded_at": "2025-07-17T09:27:15.441377",
+          "source_url": "https://www.cs.ucsb.edu/~william/data/liar_dataset.zip",
+          "local_path": "datasets/liar",
+          "files": [
+            "train.tsv",
+            "test.tsv",
+            "valid.tsv"
+          ],
+          "hash": "437541ca9957e993634f9c1e71a26748"
+        }
+      }
+    }
+  }
+}

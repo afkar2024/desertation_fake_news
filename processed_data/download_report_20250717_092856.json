@@ -1,0 +1,48 @@
+{
+  "download_report": {
+    "timestamp": "2025-07-17T09:28:56.927550",
+    "summary": {
+      "total_datasets": 3,
+      "successful_downloads": 3,
+      "failed_downloads": 0
+    },
+    "datasets": {
+      "liar": {
+        "success": true,
+        "info": {
+          "downloaded_at": "2025-07-17T09:28:56.925579",
+          "source_url": "https://www.cs.ucsb.edu/~william/data/liar_dataset.zip",
+          "local_path": "datasets/liar",
+          "files": [
+            "train.tsv",
+            "test.tsv",
+            "valid.tsv"
+          ],
+          "hash": "437541ca9957e993634f9c1e71a26748"
+        }
+      },
+      "fakenewsnet": {
+        "success": true,
+        "info": {
+          "downloaded_at": "2025-07-17T09:28:56.926844",
+          "source_url": "https://github.com/KaiDMML/FakeNewsNet",
+          "local_path": "datasets/fakenewsnet",
+          "status": "manual_download_required",
+          "instructions": "datasets/fakenewsnet/README.md"
+        }
+      },
+      "politifact": {
+        "success": true,
+        "info": {
+          "downloaded_at": "2025-07-17T09:28:56.927451",
+          "source_url": "PolitiFact API",
+          "local_path": "datasets/politifact",
+          "files": [
+            "politifact_data.json"
+          ],
+          "record_count": 100
+        }
+      }
+    }
+  }
+}

@@ -1,22 +1,31 @@
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, HttpUrl
+from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 import httpx
 import asyncio
 from datetime import datetime, timedelta
 import json
 import uuid
+import warnings
 from pathlib import Path
+from contextlib import asynccontextmanager
 from app.config import settings
 from pydantic_settings import BaseSettings
+from app.dataset_api import router as dataset_router
+
+# Suppress known deprecation warnings
+warnings.filterwarnings("ignore", category=UserWarning, module="textstat")
+warnings.filterwarnings("ignore", category=FutureWarning, module="huggingface_hub")
+warnings.filterwarnings("ignore", message="pkg_resources is deprecated")
+warnings.filterwarnings("ignore", message="resume_download is deprecated")
 
 # Data models
 class NewsArticle(BaseModel):
     id: str
     title: str
     content: str
-    url: HttpUrl
+    url: str
     source: str
     published_date: datetime
     author: Optional[str] = None
@@ -27,14 +36,14 @@ class NewsArticle(BaseModel):
 class DataSource(BaseModel):
     name: str
     type: str  # 'api', 'rss', 'social'
-    url: HttpUrl
+    url: str
     api_key: Optional[str] = None
     is_active: bool = True
     last_scraped: Optional[datetime] = None
 
 class PredictionRequest(BaseModel):
     text: str
-    url: Optional[HttpUrl] = None
+    url: Optional[str] = None
     source: Optional[str] = None
 
 class PredictionResponse(BaseModel):
@@ -43,11 +52,49 @@ class PredictionResponse(BaseModel):
     explanation: Optional[Dict[str, Any]] = None
     processed_at: datetime
 
-# Initialize FastAPI app
+# In-memory storage (replace with database in production)
+articles_db: List[NewsArticle] = []
+data_sources_db: List[DataSource] = []
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    sample_sources = [
+        DataSource(
+            name="NewsAPI General",
+            type="api",
+            url="https://newsapi.org/v2/top-headlines?country=us&category=general",
+            api_key=settings.newsapi_key,
+            is_active=bool(settings.newsapi_key)
+        ),
+        DataSource(
+            name="BBC RSS",
+            type="rss",
+            url="http://feeds.bbci.co.uk/news/rss.xml",
+            is_active=True
+        ),
+        DataSource(
+            name="CNN RSS",
+            type="rss", 
+            url="http://rss.cnn.com/rss/edition.rss",
+            is_active=True
+        )
+    ]
+    
+    data_sources_db.extend(sample_sources)
+    print(f"Initialized with {len(sample_sources)} sample data sources")
+    
+    yield
+    
+    # Shutdown (if needed)
+    pass
+
+# Initialize FastAPI app with lifespan
 app = FastAPI(
     title="Adaptive Fake News Detector - Data Gathering API",
     description="FastAPI backend for collecting and analyzing news data from multiple sources",
-    version="1.0.0"
+    version="1.0.0",
+    lifespan=lifespan
 )
 
 # Add CORS middleware
@@ -59,9 +106,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# In-memory storage (replace with database in production)
-articles_db: List[NewsArticle] = []
-data_sources_db: List[DataSource] = []
+# Include dataset router
+app.include_router(dataset_router)
 
 # Utility functions
 def save_article(article: NewsArticle):
@@ -209,7 +255,7 @@ async def get_articles_count():
     }
 
 # Data Gathering
-@app.post("/gather")
+@app.get("/gather")
 async def gather_data(background_tasks: BackgroundTasks, sources: Optional[List[str]] = None):
     """Trigger data gathering from configured sources"""
     if not data_sources_db:
@@ -346,35 +392,6 @@ async def get_analytics_summary():
         "last_7_days": daily_counts,
         "average_per_day": len(recent_articles) / 7 if recent_articles else 0
     }
-
-# Initialize with some sample data sources
-@app.on_event("startup")
-async def startup_event():
-    """Initialize the application with sample data sources"""
-    sample_sources = [
-        DataSource(
-            name="NewsAPI General",
-            type="api",
-            url="https://newsapi.org/v2/top-headlines?country=us&category=general",
-            api_key=settings.newsapi_key,
-            is_active=bool(settings.newsapi_key)
-        ),
-        DataSource(
-            name="BBC RSS",
-            type="rss",
-            url="http://feeds.bbci.co.uk/news/rss.xml",
-            is_active=True
-        ),
-        DataSource(
-            name="CNN RSS",
-            type="rss", 
-            url="http://rss.cnn.com/rss/edition.rss",
-            is_active=True
-        )
-    ]
-    
-    data_sources_db.extend(sample_sources)
-    print(f"Initialized with {len(sample_sources)} sample data sources")
 
 if __name__ == "__main__":
     import uvicorn

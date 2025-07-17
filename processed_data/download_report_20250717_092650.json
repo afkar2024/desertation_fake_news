@@ -1,0 +1,24 @@
+{
+  "download_report": {
+    "timestamp": "2025-07-17T09:26:50.182895",
+    "summary": {
+      "total_datasets": 1,
+      "successful_downloads": 1,
+      "failed_downloads": 0
+    },
+    "datasets": {
+      "politifact": {
+        "success": true,
+        "info": {
+          "downloaded_at": "2025-07-17T09:26:50.182831",
+          "source_url": "PolitiFact API",
+          "local_path": "datasets/politifact",
+          "files": [
+            "politifact_data.json"
+          ],
+          "record_count": 100
+        }
+      }
+    }
+  }
+}
