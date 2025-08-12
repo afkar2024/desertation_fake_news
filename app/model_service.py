@@ -78,8 +78,11 @@ class ModelService:
         if not texts:
             return results
 
+        # Normalize any incoming structure to a clean list of strings
+        texts_norm = self._to_list_of_strings(texts)
+
         encodings = self.tokenizer(
-            texts,
+            texts_norm,
             return_tensors="pt",
             truncation=True,
             max_length=256,
@@ -92,7 +95,7 @@ class ModelService:
             logits = outputs.logits / max(self.temperature, 1e-6)
             probs = torch.softmax(logits, dim=-1)
 
-        for i in range(len(texts)):
+        for i in range(len(texts_norm)):
             p = probs[i]
             pred_idx = int(torch.argmax(p).item())
             # Uncertainty metrics per example
@@ -117,8 +120,9 @@ class ModelService:
     def _predict_proba(self, texts: List[str]) -> np.ndarray:
         if not texts:
             return np.zeros((0, self.num_labels), dtype=float)
+        texts_norm = self._to_list_of_strings(texts)
         encodings = self.tokenizer(
-            texts,
+            texts_norm,
             return_tensors="pt",
             truncation=True,
             max_length=256,
@@ -135,8 +139,9 @@ class ModelService:
         """Return raw logits for a batch of texts as numpy array (N, C)."""
         if not texts:
             return np.zeros((0, self.num_labels), dtype=float)
+        texts_norm = self._to_list_of_strings(texts)
         encodings = self.tokenizer(
-            texts,
+            texts_norm,
             return_tensors="pt",
             truncation=True,
             max_length=256,
@@ -165,8 +170,9 @@ class ModelService:
                 "mutual_information": [],
             }
 
+        texts_norm = self._to_list_of_strings(texts)
         encodings = self.tokenizer(
-            texts,
+            texts_norm,
             return_tensors="pt",
             truncation=True,
             max_length=256,
@@ -208,8 +214,10 @@ class ModelService:
             return {"tokens": [], "shap_values": [], "base_value": 0.0}
 
         if self._explainer is None:
-            # Initialize a text explainer using tokenizer as masker
-            self._explainer = shap.Explainer(self._predict_proba, self.tokenizer)
+            # Use a regex-based text masker to ensure inputs remain plain strings
+            # This avoids incompatibilities with certain SHAP + HF tokenizer versions.
+            text_masker = shap.maskers.Text(r"\W+")  # split on non-word boundaries
+            self._explainer = shap.Explainer(self._predict_proba, text_masker)
 
         evals = max_evals if max_evals is not None else settings.explanation_max_evals
         sv = self._explainer([text], max_evals=evals)
@@ -320,6 +328,35 @@ class ModelService:
             weights_norm = [0.0 for _ in tokens]
 
         return {"tokens": tokens, "weights": weights_norm}
+
+    def _to_list_of_strings(self, inputs: Any) -> List[str]:
+        """Best-effort normalization to a list of raw strings for tokenization.
+
+        Accepts a single string, list/tuple/ndarray of strings, or a nested
+        list of tokens (which will be joined with spaces). Falls back to str(x).
+        This is robust to SHAP text masker inputs which can be numpy arrays or
+        object-dtype containers.
+        """
+        # Single string
+        if isinstance(inputs, str):
+            return [inputs]
+        # Already a list/tuple/np.ndarray
+        if isinstance(inputs, (list, tuple, np.ndarray)):
+            result: List[str] = []
+            for item in inputs:
+                if isinstance(item, str):
+                    result.append(item)
+                elif isinstance(item, (list, tuple, np.ndarray)):
+                    # pretokenized tokens -> join into a string
+                    try:
+                        result.append(" ".join(map(str, list(item))))
+                    except Exception:
+                        result.append(str(item))
+                else:
+                    result.append(str(item))
+            return result
+        # Fallback
+        return [str(inputs)]
 
     def get_top_influential_tokens_shap(self, text: str, top_k: int = 5, by: str = "abs") -> List[str]:
         """Return top-k influential tokens from SHAP explanation.

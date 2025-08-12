@@ -3,7 +3,7 @@ API endpoints for dataset management and preprocessing
 """
 
 from fastapi import APIRouter, HTTPException, BackgroundTasks
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 from typing import Dict, List, Optional, Any
 import pandas as pd
@@ -18,8 +18,17 @@ from .dataset_manager import dataset_manager
 from .preprocessing import preprocessor
 from .model_service import model_service
 from .reports import write_metrics_report, write_comparative_metrics_report
+from .cache_store import (
+    compute_params_hash,
+    get_result as cache_get,
+    put_result as cache_put,
+    add_report,
+    list_reports_json,
+    get_report_json,
+)
 from .data_utils import calculate_fake_news_score
 from .reports import write_cross_domain_report
+from .eval_progress import progress_manager
 
 router = APIRouter(prefix="/datasets", tags=["datasets"])
 
@@ -51,7 +60,7 @@ class FullPipelineRequest(BaseModel):
     label_column: str = "label"
     balance_strategy: Optional[str] = None  # 'undersample', 'oversample', or None
     download_if_missing: bool = True
-    return_markdown: bool = True
+    return_markdown: bool = False
 
 def generate_markdown_report_api(results: Optional[Dict[str, bool]] = None, 
                                original_df: Optional[pd.DataFrame] = None, 
@@ -344,6 +353,7 @@ class EvaluateModelRequest(BaseModel):
     limit: int = 1000
     binary_mapping: Optional[Dict[str, int]] = None  # optional custom mapping
     compare_baseline: bool = True
+    save_report: bool = False
     shap_samples: int = 5  # number of SHAP examples to save to processed_data
     compare_traditional: bool = False  # optional TF-IDF + LogisticRegression baseline
     compare_svm: bool = False  # optional TF-IDF + LinearSVC (with calibration)
@@ -366,6 +376,7 @@ class EvaluateModelResponse(BaseModel):
     recall: float
     f1: float
     report_path: Optional[str] = None
+    extra_metrics: Optional[Dict[str, Any]] = None
 
 
 class CrossDomainEvaluateRequest(BaseModel):
@@ -374,10 +385,11 @@ class CrossDomainEvaluateRequest(BaseModel):
     limit: int = 1000
     compare_baseline: bool = True
     datasets: List[str] = ["liar", "politifact"]
+    save_report: bool = False
 
 
 @router.post("/evaluate/cross-domain")
-async def evaluate_cross_domain(request: CrossDomainEvaluateRequest):
+async def evaluate_cross_domain(request: CrossDomainEvaluateRequest, trace_id: Optional[str] = None):
     """Evaluate the current model across multiple datasets and write a summary report."""
     evaluations: List[Dict[str, Any]] = []
 
@@ -473,10 +485,19 @@ async def evaluate_cross_domain(request: CrossDomainEvaluateRequest):
             # Keep going for other datasets
             continue
 
-    report_dir = Path("processed_data")
-    report_dir.mkdir(parents=True, exist_ok=True)
-    report_path = write_cross_domain_report({"evaluations": evaluations}, report_dir)
-    return {"evaluations": evaluations, "report_path": report_path}
+    report_path = None
+    if request.save_report:
+        report_dir = Path("processed_data")
+        report_dir.mkdir(parents=True, exist_ok=True)
+        report_path = write_cross_domain_report({"evaluations": evaluations}, report_dir)
+    # Cache per request shape (datasets + params)
+    dataset_fp = "|".join([f"{e['dataset']}:{e['size']}" for e in evaluations])
+    params_hash = compute_params_hash(request.dict())
+    payload = {"evaluations": evaluations, "report_path": report_path}
+    trace = cache_put(trace_id=trace_id, dataset="multi", process="cross_domain", params_hash=params_hash, dataset_fingerprint=dataset_fp, payload=payload)
+    payload["trace_id"] = trace
+    payload["cached"] = False
+    return payload
 
 
 class ActiveSamplingRequest(BaseModel):
@@ -596,20 +617,59 @@ async def get_dataset_info(dataset_name: str):
     return info
 
 @router.get("/{dataset_name}/sample")
-async def get_dataset_sample(dataset_name: str, limit: int = 10):
+async def get_dataset_sample(dataset_name: str, size: int = 10):
     """Get a sample of records from a dataset"""
     try:
         if dataset_name == "liar":
             df = dataset_manager.load_liar_dataset()
         elif dataset_name == "politifact":
             df = dataset_manager.load_politifact_dataset()
+        elif dataset_name == "fakenewsnet":
+            # Not implemented in demo scope: return an empty sample gracefully
+            return {
+                "dataset": dataset_name,
+                "total_records": 0,
+                "sample_size": 0,
+                "sample": []
+            }
         else:
-            raise HTTPException(status_code=400, detail="Dataset loading not implemented")
+            # Unknown dataset: return empty response (avoid breaking frontend flow)
+            return {
+                "dataset": dataset_name,
+                "total_records": 0,
+                "sample_size": 0,
+                "sample": []
+            }
         
         if df is None:
             raise HTTPException(status_code=404, detail="Dataset not found or not downloaded")
         
-        sample = df.head(limit).to_dict('records')
+        # Clean the dataframe to handle inf, -inf, and NaN values for JSON serialization
+        df_clean = df.copy()
+        
+        # Replace inf, -inf with None (which becomes null in JSON)
+        df_clean = df_clean.replace([float('inf'), float('-inf')], None)
+        
+        # Replace NaN with None - use a more robust approach
+        df_clean = df_clean.where(pd.notnull(df_clean), None)
+        
+        # Convert to records and ensure all values are JSON serializable
+        sample = df_clean.head(size).to_dict('records')
+        
+        # Additional safety check: convert any remaining problematic values
+        def clean_record(record):
+            cleaned = {}
+            for key, value in record.items():
+                if pd.isna(value) or (isinstance(value, float) and (value == float('inf') or value == float('-inf'))):
+                    cleaned[key] = None
+                elif isinstance(value, (int, float)) and (value == float('inf') or value == float('-inf') or value != value):  # NaN check
+                    cleaned[key] = None
+                else:
+                    cleaned[key] = value
+            return cleaned
+        
+        sample = [clean_record(record) for record in sample]
+        
         return {
             "dataset": dataset_name,
             "total_records": len(df),
@@ -724,8 +784,9 @@ async def _preprocess_dataset_task(
 @router.post("/full-pipeline/{dataset_name}")
 async def full_pipeline_processing(
     dataset_name: str,
-    request: FullPipelineRequest,
-    background_tasks: BackgroundTasks
+    request: FullPipelineRequest = FullPipelineRequest(),
+    background_tasks: BackgroundTasks = None,
+    trace_id: Optional[str] = None,
 ):
     """
     Complete pipeline: Download dataset (if needed), preprocess, and return markdown report
@@ -780,6 +841,13 @@ async def full_pipeline_processing(
         if request.label_column not in df.columns:
             raise HTTPException(status_code=400, detail=f"Label column '{request.label_column}' not found")
         
+        # Simple cache check before processing
+        dataset_fp = str(len(df))  # minimal fingerprint: can be enhanced to hash content if needed
+        params_hash = compute_params_hash(request.dict())
+        cached = cache_get(dataset=dataset_name, process="full_pipeline", params_hash=params_hash, dataset_fingerprint=dataset_fp, trace_id=trace_id)
+        if cached:
+            return cached
+
         # Step 4: Preprocess the dataset
         original_df = df.copy()
         processed_df = preprocessor.preprocess_dataframe(df, request.text_column, request.label_column)
@@ -800,52 +868,40 @@ async def full_pipeline_processing(
         preprocessor.save_preprocessed_data(final_df, str(csv_file))
         
         # Step 7: Generate markdown report
-        if request.return_markdown:
-            report_file = generate_markdown_report_api(
-                results=download_results,
-                original_df=original_df,
-                processed_df=processed_df,
-                balanced_df=balanced_df,
-                dataset_name=dataset_name,
-                output_dir=output_dir,
-                report_type="full_pipeline"
-            )
-            
-            # Return the markdown file for download
-            return FileResponse(
-                path=report_file,
-                media_type='text/markdown',
-                filename=f"{dataset_name}_full_pipeline_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
-            )
-        else:
-            # Return JSON response with summary
-            return {
-                "success": True,
-                "message": f"Full pipeline completed for {dataset_name}",
-                "download_results": download_results,
-                "original_records": len(original_df),
-                "processed_records": len(processed_df),
-                "final_records": len(final_df),
-                "features_added": len(processed_df.columns) - len(original_df.columns),
-                "balance_strategy": request.balance_strategy,
-                "files_generated": {
-                    "processed_csv": str(csv_file),
-                    "label_mapping": str(output_dir / f"{dataset_name}_processed_label_mapping.json")
-                }
+        # Default: return JSON payload for UI (no file streaming)
+        response_payload = {
+            "success": True,
+            "message": f"Full pipeline completed for {dataset_name}",
+            "download_results": download_results,
+            "original_records": len(original_df),
+            "processed_records": len(processed_df),
+            "final_records": len(final_df),
+            "features_added": len(processed_df.columns) - len(original_df.columns),
+            "balance_strategy": request.balance_strategy,
+            "files_generated": {
+                "processed_csv": str(csv_file),
+                "label_mapping": str(output_dir / f"{dataset_name}_processed_label_mapping.json")
             }
+        }
+        trace = cache_put(trace_id=trace_id, dataset=dataset_name, process="full_pipeline", params_hash=params_hash, dataset_fingerprint=dataset_fp, payload=response_payload)
+        response_payload["trace_id"] = trace
+        response_payload["cached"] = False
+        return response_payload
     
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error in full pipeline: {str(e)}")
 
 
 @router.post("/evaluate/{dataset_name}", response_model=EvaluateModelResponse)
-async def evaluate_model_on_dataset(dataset_name: str, request: EvaluateModelRequest):
+async def evaluate_model_on_dataset(dataset_name: str, request: EvaluateModelRequest, trace_id: Optional[str] = None):
     """Quick evaluation of current model on a dataset subset; writes a metrics report."""
     import numpy as np
     from sklearn.metrics import accuracy_score, precision_recall_fscore_support
-    from sklearn.metrics import roc_auc_score, average_precision_score
+    from sklearn.metrics import roc_auc_score, average_precision_score, confusion_matrix, roc_curve, precision_recall_curve
 
     try:
+        trace = trace_id or f"eval-{datetime.now().timestamp()}"
+        await progress_manager.publish(trace, stage="start", message="Starting evaluation")
         # Load dataset
         if dataset_name == "liar":
             df = dataset_manager.load_liar_dataset()
@@ -867,8 +923,27 @@ async def evaluate_model_on_dataset(dataset_name: str, request: EvaluateModelReq
         if df is None or df.empty:
             raise HTTPException(status_code=404, detail="Dataset not found or empty")
 
+        # Cache check before heavy work
+        dataset_fp = str(len(df))
+        params_hash = compute_params_hash(request.dict())
+        cached = cache_get(dataset=dataset_name, process="evaluate", params_hash=params_hash, dataset_fingerprint=dataset_fp, trace_id=trace_id)
+        if cached:
+            await progress_manager.publish(trace, stage="cached", message="Returning cached evaluation", percent=100.0)
+            # map cached payload back to model response structure if needed
+            return EvaluateModelResponse(
+                dataset=dataset_name,
+                total_evaluated=int(cached.get("total_evaluated", 0)),
+                accuracy=float(cached.get("accuracy", 0.0)),
+                precision=float(cached.get("precision", 0.0)),
+                recall=float(cached.get("recall", 0.0)),
+                f1=float(cached.get("f1", 0.0)),
+                report_path=cached.get("report_path"),
+                extra_metrics=cached.get("extra_metrics", {}),
+            )
+
         # Subset
         df = df.head(max(1, request.limit))
+        await progress_manager.publish(trace, stage="subset", message=f"Subset to {len(df)} records")
 
         # Prepare labels
         y_true = None
@@ -887,6 +962,7 @@ async def evaluate_model_on_dataset(dataset_name: str, request: EvaluateModelReq
 
         # Generate predictions (model)
         texts = df[request.text_column].astype(str).tolist()
+        await progress_manager.publish(trace, stage="predict", message="Running model predictions")
         preds = model_service.classify_batch(texts)
         y_pred = np.array([p["prediction"] for p in preds], dtype=int)
 
@@ -904,6 +980,15 @@ async def evaluate_model_on_dataset(dataset_name: str, request: EvaluateModelReq
             precision, recall, f1, _ = precision_recall_fscore_support(
                 y_true_arr, y_pred, average="binary", zero_division=0
             )
+            await progress_manager.publish(trace, stage="metrics", message="Computing metrics")
+            # Confusion matrix (TN, FP, FN, TP)
+            try:
+                tn, fp, fn, tp = confusion_matrix(y_true_arr, y_pred, labels=[0, 1]).ravel()
+                metrics_payload = {
+                    "confusion_matrix": [[int(tn), int(fp)], [int(fn), int(tp)]],
+                }
+            except Exception:
+                metrics_payload = {}
 
             # Calibration & discrimination metrics
             try:
@@ -911,12 +996,18 @@ async def evaluate_model_on_dataset(dataset_name: str, request: EvaluateModelReq
                 prob_fake = np.array([float(item.get("probabilities", {}).get("fake", 0.0)) for item in preds])
                 # Brier score
                 brier = float(np.mean((prob_fake - y_true_arr) ** 2))
-                # ROC-AUC, PR-AUC
+                # ROC/PR curves and AUCs
                 roc_auc = None
                 pr_auc = None
+                roc_points = None
+                pr_points = None
                 try:
                     if len(np.unique(y_true_arr)) > 1:
+                        fpr, tpr, _ = roc_curve(y_true_arr, prob_fake)
+                        roc_points = [{"fpr": float(f), "tpr": float(t)} for f, t in zip(fpr, tpr)]
                         roc_auc = float(roc_auc_score(y_true_arr, prob_fake))
+                        prec, rec, _ = precision_recall_curve(y_true_arr, prob_fake)
+                        pr_points = [{"precision": float(p), "recall": float(r)} for p, r in zip(prec, rec)]
                         pr_auc = float(average_precision_score(y_true_arr, prob_fake))
                 except Exception:
                     pass
@@ -948,8 +1039,12 @@ async def evaluate_model_on_dataset(dataset_name: str, request: EvaluateModelReq
                 }
                 if roc_auc is not None:
                     calibration_metrics["roc_auc"] = round(roc_auc, 6)
+                    if roc_points is not None:
+                        calibration_metrics["roc_curve"] = {"auc": round(roc_auc, 6), "points": roc_points}
                 if pr_auc is not None:
                     calibration_metrics["pr_auc"] = round(pr_auc, 6)
+                    if pr_points is not None:
+                        calibration_metrics["pr_curve"] = {"auc": round(pr_auc, 6), "points": pr_points}
                 # include bins for report
                 calibration_metrics["reliability_bins"] = reliability_bins
             except Exception:
@@ -958,6 +1053,7 @@ async def evaluate_model_on_dataset(dataset_name: str, request: EvaluateModelReq
             # MC Dropout uncertainty (epistemic) if requested
             if request.mc_dropout_samples and request.mc_dropout_samples > 0:
                 try:
+                    await progress_manager.publish(trace, stage="uncertainty", message="Computing MC Dropout uncertainty")
                     mc = model_service.predict_proba_mc(texts, mc_samples=int(request.mc_dropout_samples))
                     mi = mc.get("mutual_information", [])
                     if len(mi) == len(texts):
@@ -978,6 +1074,7 @@ async def evaluate_model_on_dataset(dataset_name: str, request: EvaluateModelReq
             # Fairness across subgroups
             if request.fairness_column and request.fairness_column in df.columns:
                 try:
+                    await progress_manager.publish(trace, stage="fairness", message="Computing fairness metrics")
                     groups = df[request.fairness_column].astype(str).fillna("unknown")
                     y_true_arr_f = y_true_arr
                     gaps = []
@@ -1000,6 +1097,7 @@ async def evaluate_model_on_dataset(dataset_name: str, request: EvaluateModelReq
             # Temporal stability analysis
             if request.temporal_column and request.temporal_column in df.columns:
                 try:
+                    await progress_manager.publish(trace, stage="temporal", message="Computing temporal stability")
                     tseries = pd.to_datetime(df[request.temporal_column], errors='coerce')
                     if request.temporal_granularity == "day":
                         keys = tseries.dt.strftime("%Y-%m-%d")
@@ -1049,6 +1147,7 @@ async def evaluate_model_on_dataset(dataset_name: str, request: EvaluateModelReq
             exp_quality_metrics = None
             if request.explainability_quality:
                 try:
+                    await progress_manager.publish(trace, stage="xai_quality", message="Computing explanation quality")
                     sample_k = int(max(5, min(20, len(texts) * 0.1)))
                     idxs = list(range(len(texts)))[:sample_k]
                     top_k_tokens = 5
@@ -1149,6 +1248,7 @@ async def evaluate_model_on_dataset(dataset_name: str, request: EvaluateModelReq
             nb_prob = None
             if request.compare_traditional and y_true is not None:
                 try:
+                    await progress_manager.publish(trace, stage="baseline_traditional", message="Computing traditional baseline")
                     from sklearn.feature_extraction.text import TfidfVectorizer
                     from sklearn.linear_model import LogisticRegression
                     from sklearn.pipeline import Pipeline
@@ -1219,6 +1319,7 @@ async def evaluate_model_on_dataset(dataset_name: str, request: EvaluateModelReq
             # SVM baseline (with probability calibration)
             if request.compare_svm and y_true is not None:
                 try:
+                    await progress_manager.publish(trace, stage="baseline_svm", message="Computing SVM baseline")
                     from sklearn.feature_extraction.text import TfidfVectorizer
                     from sklearn.svm import LinearSVC
                     from sklearn.calibration import CalibratedClassifierCV
@@ -1268,6 +1369,7 @@ async def evaluate_model_on_dataset(dataset_name: str, request: EvaluateModelReq
             # Naive Bayes baseline (MultinomialNB)
             if request.compare_nb and y_true is not None:
                 try:
+                    await progress_manager.publish(trace, stage="baseline_nb", message="Computing Naive Bayes baseline")
                     from sklearn.feature_extraction.text import TfidfVectorizer
                     from sklearn.naive_bayes import MultinomialNB
                     from sklearn.pipeline import Pipeline
@@ -1307,6 +1409,7 @@ async def evaluate_model_on_dataset(dataset_name: str, request: EvaluateModelReq
             # Simple ensemble (average of probabilities)
             if request.use_ensemble and y_true is not None:
                 try:
+                    await progress_manager.publish(trace, stage="ensemble", message="Computing ensemble")
                     # transformer probabilities
                     prob_fake = np.array([float(item.get("probabilities", {}).get("fake", 0.0)) for item in preds])
                     prob_list = [prob_fake]
@@ -1478,18 +1581,21 @@ async def evaluate_model_on_dataset(dataset_name: str, request: EvaluateModelReq
         if attention_metrics:
             metrics_payload.update(attention_metrics)
 
-        if baseline_metrics or mcnemar_stats or calibration_metrics or metrics_payload.get("robustness_accuracy") or metrics_payload.get("coverage_accuracy") or metrics_payload.get("mutual_information_mean") or metrics_payload.get("explainability_quality_topk_delta_mean") or metrics_payload.get("fairness_groups") or metrics_payload.get("temporal_periods") or metrics_payload.get("attention_topk_mean"):
-            if baseline_metrics:
-                metrics_payload.update(baseline_metrics)
-            if mcnemar_stats:
-                metrics_payload.update(mcnemar_stats)
-            if calibration_metrics:
-                metrics_payload.update(calibration_metrics)
-            report_path = write_comparative_metrics_report(metrics_payload, report_dir)
-        else:
-            report_path = write_metrics_report(metrics_payload, report_dir)
+        # Optionally write reports (disabled by default; UI consumes JSON directly)
+        report_path: Optional[str] = None
+        if request.save_report:
+            if baseline_metrics or mcnemar_stats or calibration_metrics or metrics_payload.get("robustness_accuracy") or metrics_payload.get("coverage_accuracy") or metrics_payload.get("mutual_information_mean") or metrics_payload.get("explainability_quality_topk_delta_mean") or metrics_payload.get("fairness_groups") or metrics_payload.get("temporal_periods") or metrics_payload.get("attention_topk_mean"):
+                if baseline_metrics:
+                    metrics_payload.update(baseline_metrics)
+                if mcnemar_stats:
+                    metrics_payload.update(mcnemar_stats)
+                if calibration_metrics:
+                    metrics_payload.update(calibration_metrics)
+                report_path = write_comparative_metrics_report(metrics_payload, report_dir)
+            else:
+                report_path = write_metrics_report(metrics_payload, report_dir)
 
-        return EvaluateModelResponse(
+        response = EvaluateModelResponse(
             dataset=dataset_name,
             total_evaluated=int(len(df)),
             accuracy=accuracy,
@@ -1497,7 +1603,40 @@ async def evaluate_model_on_dataset(dataset_name: str, request: EvaluateModelReq
             recall=float(recall),
             f1=float(f1),
             report_path=report_path,
+            extra_metrics=metrics_payload,
         )
+        progress_manager.set_result(trace, {
+            "dataset": dataset_name,
+            "total_evaluated": int(len(df)),
+            "metrics": metrics_payload,
+        })
+        await progress_manager.publish(trace, stage="done", message="Evaluation complete", percent=100.0)
+        # Store cache
+        cache_payload = {
+            "dataset": dataset_name,
+            "total_evaluated": int(len(df)),
+            "accuracy": accuracy,
+            "precision": float(precision),
+            "recall": float(recall),
+            "f1": float(f1),
+            "report_path": report_path,
+            "extra_metrics": metrics_payload,
+        }
+        trace = cache_put(
+            trace_id=trace_id,
+            dataset=dataset_name,
+            process="evaluate",
+            params_hash=params_hash,
+            dataset_fingerprint=dataset_fp,
+            payload=cache_payload,
+        )
+        try:
+            if request.save_report:
+                add_report(dataset=dataset_name, report_type="evaluation", payload=cache_payload)
+        except Exception:
+            pass
+        response.extra_metrics["trace_id"] = trace
+        return response
     except HTTPException:
         raise
     except Exception as e:

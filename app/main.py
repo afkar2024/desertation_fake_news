@@ -1,6 +1,7 @@
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, Response, JSONResponse
+import traceback
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 import httpx
@@ -19,6 +20,8 @@ from scipy.stats import ks_2samp
 from app.dataset_api import router as dataset_router
 from app.model_service import model_service
 from app.feedback_api import router as feedback_router
+from app.eval_progress import progress_manager
+from fastapi import WebSocket, WebSocketDisconnect
 
 # Suppress known deprecation warnings
 warnings.filterwarnings("ignore", category=UserWarning, module="textstat")
@@ -129,6 +132,31 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+# Global exception handler with detailed context
+@app.exception_handler(Exception)
+async def global_exception_handler(request, exc: Exception):
+    tb = traceback.TracebackException.from_exception(exc)
+    last = None
+    for frame in tb.stack:
+        last = frame
+    location = {
+        "file": getattr(last, 'filename', None),
+        "function": getattr(last, 'name', None),
+        "line": getattr(last, 'lineno', None),
+        "url": str(request.url) if hasattr(request, 'url') else None,
+        "method": getattr(request, 'method', None),
+    }
+    print("[EXCEPTION]", {
+        "type": type(exc).__name__,
+        "message": str(exc),
+        "location": location,
+    })
+    return JSONResponse(status_code=500, content={
+        "detail": f"Internal Server Error: {type(exc).__name__}",
+        "error": str(exc),
+        "location": location,
+    })
+
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
@@ -141,6 +169,30 @@ app.add_middleware(
 # Include dataset router
 app.include_router(dataset_router)
 app.include_router(feedback_router)
+# WebSocket for evaluation progress
+@app.websocket("/ws/evaluation/{trace_id}")
+async def ws_evaluation(websocket: WebSocket, trace_id: str):
+    await websocket.accept()
+    progress_manager.attach(trace_id, websocket)
+    try:
+        # If there are queued messages, they will be pushed by publisher
+        # Send hello
+        await websocket.send_json({"type": "hello", "trace_id": trace_id})
+        # Keep open until client disconnects
+        while True:
+            # Simple ping to keep alive
+            await asyncio.sleep(10)
+            try:
+                await websocket.send_json({"type": "ping"})
+            except Exception:
+                break
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        pass
+    finally:
+        progress_manager.detach(trace_id, websocket)
+
 
 # Utility functions
 def save_article(article: NewsArticle):
@@ -735,7 +787,77 @@ async def get_analytics_summary():
     except Exception:
         pass
 
+    # Provide top-level aliases for frontend convenience
+    try:
+        pm = payload.get("prediction_monitor", {})
+        payload["prediction_count"] = int(pm.get("count", 0))
+        payload["avg_prob_fake"] = float(pm.get("avg_prob_fake", 0.0))
+        payload["avg_prob_real"] = float(pm.get("avg_prob_real", 0.0))
+        drift = (pm.get("drift") or {})
+        if "p_value" in drift:
+            payload["drift_ks_p_value"] = float(drift.get("p_value"))
+        # Optional: include short histories if available in log
+        # Compute recent rolling averages over last 50 predictions
+        if prediction_log:
+            window = min(50, len(prediction_log))
+            recent = prediction_log[-window:]
+            # simple per-sample history of probs (not rolling average), for sparkline
+            payload["avg_prob_fake_history"] = [float(x.get("prob_fake", 0.0)) for x in recent]
+            payload["avg_prob_real_history"] = [float(x.get("prob_real", 0.0)) for x in recent]
+    except Exception:
+        pass
+
+    # Attach latest evaluation report summary, if any
+    try:
+        from app.cache_store import list_reports_json, get_report_json
+        items = list_reports_json(limit=1)
+        latest = None
+        for it in items:
+            # find most recent evaluation report
+            if it.get("report_type") == "evaluation":
+                latest = it
+                break
+        if latest:
+            rep = get_report_json(int(latest.get("id")))
+            payload["last_evaluation"] = {
+                "dataset": rep.get("dataset"),
+                "created_at": rep.get("created_at"),
+                "metrics": {
+                    "accuracy": rep.get("payload", {}).get("accuracy"),
+                    "precision": rep.get("payload", {}).get("precision"),
+                    "recall": rep.get("payload", {}).get("recall"),
+                    "f1": rep.get("payload", {}).get("f1"),
+                },
+                "size": rep.get("payload", {}).get("total_evaluated"),
+            }
+    except Exception:
+        pass
+
     return payload
+
+# Reports browsing endpoints (frontend markdown preview)
+@app.get("/reports")
+async def list_reports():
+    try:
+        from app.cache_store import list_reports_json
+        items = list_reports_json(limit=50)
+        return {"items": items, "format": "json"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to list reports: {str(e)}")
+
+
+@app.get("/reports/{report_id}")
+async def get_report(report_id: int):
+    try:
+        from app.cache_store import get_report_json
+        item = get_report_json(report_id)
+        if not item:
+            raise HTTPException(status_code=404, detail="Report not found")
+        return item
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to read report: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn
