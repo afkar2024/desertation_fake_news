@@ -48,11 +48,17 @@ def main():
     else:
         print("⚠️  No .env file found - using default settings")
         print("💡 Create a .env file to configure API keys and settings")
-    NEWSAPI_KEY = os.getenv("NEWSAPI_KEY")
-    TWITTER_BEARER_TOKEN = os.getenv("TWITTER_BEARER_TOKEN")
+    NEWSAPI_KEY = os.getenv("NEWSAPI_KEY", "")
+    TWITTER_BEARER_TOKEN = os.getenv("TWITTER_BEARER_TOKEN", "")
     # show the keys partially to avoid logging the full key
-    print(f"   NEWSAPI_KEY={NEWSAPI_KEY[:5]}...{NEWSAPI_KEY[-5:]}")
-    print(f"   TWITTER_BEARER_TOKEN={TWITTER_BEARER_TOKEN[:5]}...{TWITTER_BEARER_TOKEN[-5:]}")
+    def _mask(val: str) -> str:
+        if not val:
+            return "<not-set>"
+        if len(val) <= 10:
+            return "***"
+        return f"{val[:5]}...{val[-5:]}"
+    print(f"   NEWSAPI_KEY={_mask(NEWSAPI_KEY)}")
+    print(f"   TWITTER_BEARER_TOKEN={_mask(TWITTER_BEARER_TOKEN)}")
     print()
     print("🔑 To add API keys, create a .env file with:")
     print()

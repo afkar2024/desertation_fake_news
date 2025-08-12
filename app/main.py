@@ -1,5 +1,6 @@
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 import httpx
@@ -11,8 +12,13 @@ import warnings
 from pathlib import Path
 from contextlib import asynccontextmanager
 from app.config import settings
+from app.data_utils import fetch_rss_articles, fetch_article_content
 from pydantic_settings import BaseSettings
+from collections import deque
+from scipy.stats import ks_2samp
 from app.dataset_api import router as dataset_router
+from app.model_service import model_service
+from app.feedback_api import router as feedback_router
 
 # Suppress known deprecation warnings
 warnings.filterwarnings("ignore", category=UserWarning, module="textstat")
@@ -45,6 +51,8 @@ class PredictionRequest(BaseModel):
     text: str
     url: Optional[str] = None
     source: Optional[str] = None
+    abstain_threshold: Optional[float] = None  # abstain if uncertainty metric below/above threshold
+    abstain_metric: Optional[str] = "margin"   # 'margin' (abstain if margin < thr) or 'entropy' (abstain if entropy > thr)
 
 class PredictionResponse(BaseModel):
     prediction: str  # 'real' or 'fake'
@@ -52,9 +60,33 @@ class PredictionResponse(BaseModel):
     explanation: Optional[Dict[str, Any]] = None
     processed_at: datetime
 
+class ExplanationRequest(BaseModel):
+    text: str
+    max_evals: Optional[int] = None
+
+class PredictUrlRequest(BaseModel):
+    url: str
+    max_chars: int = 5000
+    source: Optional[str] = None
+
+class PredictExplainRequest(BaseModel):
+    text: str
+    max_evals: Optional[int] = None
+    top_tokens: int = 30
+    use_lime: bool = False
+    use_attention: bool = False
+    explanation_confidence: bool = False
+
 # In-memory storage (replace with database in production)
 articles_db: List[NewsArticle] = []
 data_sources_db: List[DataSource] = []
+prediction_log: List[Dict[str, Any]] = []  # {'ts': datetime, 'prob_fake': float, 'prob_real': float}
+
+# Drift monitoring (lightweight):
+recent_fake_probs: deque[float] = deque(maxlen=2000)
+baseline_fake_probs: List[float] = []
+baseline_set_at: Optional[str] = None
+KS_P_THRESHOLD: float = 0.01
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -108,6 +140,7 @@ app.add_middleware(
 
 # Include dataset router
 app.include_router(dataset_router)
+app.include_router(feedback_router)
 
 # Utility functions
 def save_article(article: NewsArticle):
@@ -154,21 +187,29 @@ async def fetch_from_api(source: DataSource) -> List[NewsArticle]:
 
 async def fetch_from_rss(source: DataSource) -> List[NewsArticle]:
     """Fetch articles from RSS feed"""
-    # Note: You'll need to add feedparser to requirements.txt
-    articles = []
+    articles: List[NewsArticle] = []
     try:
-        async with httpx.AsyncClient() as client:
-            response = await client.get(str(source.url), timeout=30.0)
-            response.raise_for_status()
-            
-            # Simple RSS parsing (in production, use feedparser)
-            # For now, return empty list - implement with feedparser
-            print(f"RSS parsing not implemented yet for {source.name}")
-            
+        raw_articles = await fetch_rss_articles(str(source.url), max_articles=settings.max_articles_per_source)
+        for item in raw_articles:
+            try:
+                article = NewsArticle(
+                    id=item.get("id", str(uuid.uuid4())),
+                    title=item.get("title", ""),
+                    content=item.get("content", ""),
+                    url=item.get("url", ""),
+                    source=item.get("source", source.name),
+                    published_date=item.get("published_date") or datetime.now(),
+                    author=item.get("author"),
+                    category=item.get("category"),
+                    language=item.get("language", "en"),
+                    scraped_at=item.get("scraped_at") or datetime.now(),
+                )
+                articles.append(article)
+            except Exception as inner_e:
+                print(f"Skipping malformed RSS article from {source.name}: {inner_e}")
     except Exception as e:
         print(f"Error fetching RSS from {source.name}: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error fetching RSS from {source.name}: {str(e)}")
-    
     return articles
 
 # API Endpoints
@@ -320,47 +361,324 @@ async def gather_from_single_source(source_name: str, background_tasks: Backgrou
 # Prediction endpoints
 @app.post("/predict", response_model=PredictionResponse)
 async def predict_news(request: PredictionRequest):
-    """Predict if news text is fake or real"""
-    # Placeholder prediction logic - replace with actual ML model
-    import random
-    
-    # Simple rule-based prediction for demonstration
-    fake_keywords = ["shocking", "unbelievable", "doctors hate", "secret", "miracle"]
-    text_lower = request.text.lower()
-    
-    fake_score = sum(1 for keyword in fake_keywords if keyword in text_lower)
-    confidence = min(0.9, 0.5 + (fake_score * 0.1))
-    prediction = "fake" if fake_score > 0 else "real"
-    
-    # Add some randomness for demonstration
-    if random.random() < 0.3:  # 30% chance to flip
-        prediction = "fake" if prediction == "real" else "real"
-        confidence = max(0.5, random.uniform(0.6, 0.9))
-    
+    """Predict if news text is fake or real using transformer model"""
+    result = model_service.classify_text(request.text)
+    pred_label = "fake" if result["prediction"] == 1 else "real"
+    abstained: Optional[bool] = None
+    if request.abstain_threshold is not None:
+        if (request.abstain_metric or "margin").lower() == "entropy":
+            ent = float(result.get("uncertainty", {}).get("predictive_entropy", 0.0))
+            abstained = ent > float(request.abstain_threshold)
+        else:
+            margin = float(result.get("uncertainty", {}).get("margin", 0.0))
+            abstained = margin < float(request.abstain_threshold)
+        if abstained:
+            pred_label = "abstain"
+    explanation = {
+        "text_length": len(request.text or ""),
+        "source": request.source,
+        "probabilities": result.get("probabilities", {}),
+    }
+    # Log prediction for monitoring
+    try:
+        p = result.get("probabilities", {})
+        fake_p = float(p.get("fake", 0.0))
+        prediction_log.append({
+            "ts": datetime.now().isoformat(),
+            "prob_fake": fake_p,
+            "prob_real": float(p.get("real", 0.0)),
+        })
+        # cap log size
+        if len(prediction_log) > 5000:
+            del prediction_log[: len(prediction_log) - 5000]
+        # update drift buffers
+        recent_fake_probs.append(fake_p)
+    except Exception:
+        pass
     return PredictionResponse(
-        prediction=prediction,
-        confidence=confidence,
-        explanation={
-            "keywords_found": fake_keywords if fake_score > 0 else [],
-            "text_length": len(request.text),
-            "source": request.source
-        },
-        processed_at=datetime.now()
+        prediction=pred_label,
+        confidence=float(result["confidence"]),
+        explanation=explanation,
+        processed_at=datetime.now(),
+        **({"abstained": abstained} if abstained is not None else {}),
     )
 
 @app.post("/predict/batch")
 async def predict_batch(requests: List[PredictionRequest]):
-    """Predict multiple news texts"""
-    results = []
-    for req in requests:
-        prediction = await predict_news(req)
-        results.append(prediction)
-    
+    """Predict multiple news texts using transformer model"""
+    texts = [r.text for r in requests]
+    batch_results = model_service.classify_batch(texts)
+    responses: List[PredictionResponse] = []
+    for i, r in enumerate(batch_results):
+        pred_label = "fake" if r["prediction"] == 1 else "real"
+        abstained: Optional[bool] = None
+        req = requests[i]
+        if req.abstain_threshold is not None:
+            metric = (req.abstain_metric or "margin").lower()
+            if metric == "entropy":
+                ent = float(r.get("uncertainty", {}).get("predictive_entropy", 0.0))
+                abstained = ent > float(req.abstain_threshold)
+            else:
+                margin = float(r.get("uncertainty", {}).get("margin", 0.0))
+                abstained = margin < float(req.abstain_threshold)
+            if abstained:
+                pred_label = "abstain"
+        responses.append(
+            PredictionResponse(
+                prediction=pred_label,
+                confidence=float(r["confidence"]),
+                explanation={
+                    "text_length": len(texts[i] or ""),
+                    "source": req.source,
+                    "probabilities": r.get("probabilities", {}),
+                },
+                processed_at=datetime.now(),
+                **({"abstained": abstained} if abstained is not None else {}),
+            )
+        )
     return {
-        "predictions": results,
-        "total_processed": len(results),
-        "processed_at": datetime.now()
+        "predictions": responses,
+        "total_processed": len(responses),
+        "processed_at": datetime.now(),
     }
+
+# Model management endpoints
+@app.get("/model/info")
+async def get_model_info():
+    return model_service.get_model_info()
+
+
+class ModelReloadRequest(BaseModel):
+    model_source: Optional[str] = None  # path or HF model name
+    temperature: Optional[float] = None
+
+
+@app.post("/model/reload")
+async def reload_model(request: ModelReloadRequest):
+    try:
+        info = model_service.reload(request.model_source)
+        if request.temperature is not None:
+            model_service.set_temperature(float(request.temperature))
+            info = model_service.get_model_info()
+        return {"message": "Model reloaded", "info": info}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Model reload failed: {str(e)}")
+
+
+class TemperatureCalibrateRequest(BaseModel):
+    texts: List[str]
+    labels: List[int]
+    max_steps: int = 200
+    lr: float = 0.01
+
+
+@app.post("/model/calibrate-temperature")
+async def calibrate_temperature(req: TemperatureCalibrateRequest):
+    """Calibrate temperature on provided labeled texts (logit scaling)."""
+    try:
+        if not req.texts or not req.labels or len(req.texts) != len(req.labels):
+            raise HTTPException(status_code=400, detail="texts and labels must be non-empty and have same length")
+        new_t = model_service.calibrate_temperature(req.texts, req.labels, max_steps=req.max_steps, lr=req.lr)
+        return {"temperature": new_t}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Calibration error: {str(e)}")
+
+# Explanation endpoint (SHAP)
+@app.post("/explain/shap")
+async def explain_prediction(request: ExplanationRequest):
+    """Generate SHAP explanation for a single text"""
+    if not settings.enable_explanations:
+        raise HTTPException(status_code=400, detail="Explanations are disabled")
+
+    try:
+        exp = model_service.explain_text(request.text, max_evals=request.max_evals)
+        return {
+            "tokens": exp["tokens"],
+            "shap_values": exp["shap_values"],
+            "base_value": exp["base_value"],
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Explanation error: {str(e)}")
+
+
+@app.post("/predict/url", response_model=PredictionResponse)
+async def predict_from_url(request: PredictUrlRequest):
+    """Fetch article content from URL and predict using transformer model"""
+    try:
+        content = await fetch_article_content(request.url)
+        if not content:
+            raise HTTPException(status_code=400, detail="No content extracted from URL")
+        text = content[: max(1, request.max_chars)]
+        result = model_service.classify_text(text)
+        pred_label = "fake" if result["prediction"] == 1 else "real"
+        return PredictionResponse(
+            prediction=pred_label,
+            confidence=float(result["confidence"]),
+            explanation={
+                "url": request.url,
+                "text_length": len(text),
+                "probabilities": result.get("probabilities", {}),
+                "source": request.source,
+            },
+            processed_at=datetime.now(),
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"URL prediction error: {str(e)}")
+
+
+@app.post("/predict/explain")
+async def predict_with_explanation(request: PredictExplainRequest):
+    """Return prediction and SHAP explanation together for a single text"""
+    try:
+        pred = model_service.classify_text(request.text)
+        if request.explanation_confidence:
+            ec = model_service.explanation_confidence(request.text, top_k=max(1, min(request.top_tokens, 10)))
+            exp_preview = {"explanation_confidence": ec}
+        elif request.use_attention:
+            exp = model_service.explain_text_attention(request.text)
+            # return top tokens by weight
+            tokens = exp.get("tokens", [])
+            weights = exp.get("weights", [])
+            # pair and sort
+            pairs = list(zip(tokens, weights))
+            pairs_sorted = sorted(pairs, key=lambda x: x[1], reverse=True)[: max(1, request.top_tokens)]
+            exp_preview = {
+                "attention_tokens": [p[0] for p in pairs_sorted],
+                "attention_weights": [float(p[1]) for p in pairs_sorted],
+            }
+        elif request.use_lime:
+            exp = model_service.explain_text_lime(request.text, num_features=max(1, request.top_tokens))
+            exp_preview = {"features": exp.get("features", [])[: max(1, request.top_tokens)], "weights": exp.get("weights", [])[: max(1, request.top_tokens)]}
+        else:
+            exp = model_service.explain_text(request.text, max_evals=request.max_evals)
+            # Optionally truncate tokens for response brevity
+            top_n = max(1, request.top_tokens)
+            exp_preview = {
+                "tokens": exp.get("tokens", [])[:top_n],
+                "shap_values": exp.get("shap_values", [])[:top_n],
+                "base_value": exp.get("base_value"),
+            }
+        return {
+            "prediction": "fake" if pred["prediction"] == 1 else "real",
+            "confidence": float(pred["confidence"]),
+            "probabilities": pred.get("probabilities", {}),
+            "explanation": exp_preview,
+            "processed_at": datetime.now(),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Predict+Explain error: {str(e)}")
+
+
+@app.get("/demo", response_class=HTMLResponse)
+async def demo_page():
+    """Serve a minimal HTML demo page for prediction + SHAP preview."""
+    return """
+<!doctype html>
+<html lang=\"en\">
+<head>
+  <meta charset=\"utf-8\" />
+  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
+  <title>Fake News Demo</title>
+  <style>
+    body { font-family: system-ui, Arial, sans-serif; margin: 24px; max-width: 900px; }
+    textarea { width: 100%; height: 160px; font-size: 14px; }
+    .row { margin: 12px 0; }
+    .btn { padding: 8px 14px; border: 1px solid #ccc; background: #f7f7f7; cursor: pointer; }
+    .chip { display: inline-block; padding: 4px 10px; border-radius: 12px; margin-right: 8px; }
+    .real { background: #e8f5e9; color: #2e7d32; }
+    .fake { background: #ffebee; color: #c62828; }
+    .token { display: inline-block; margin: 2px; padding: 2px 4px; border-radius: 4px; font-family: monospace; }
+  </style>
+  </head>
+  <body>
+    <h1>Fake News Detection - Demo</h1>
+    <div class=\"row\">
+      <label for=\"text\">Enter text to analyze:</label>
+      <textarea id=\"text\" placeholder=\"Paste news text here...\"></textarea>
+    </div>
+    <div class=\"row\">
+      <button class=\"btn\" onclick=\"predictExplain()\">Predict + Explain</button>
+      <span id=\"status\"></span>
+    </div>
+    <div class=\"row\">
+      <div id=\"result\"></div>
+    </div>
+    <script>
+      async function predictExplain() {
+        const text = document.getElementById('text').value;
+        const status = document.getElementById('status');
+        const resultEl = document.getElementById('result');
+        resultEl.innerHTML = '';
+        status.textContent = 'Processing...';
+        try {
+          const resp = await fetch('/predict/explain', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text: text, top_tokens: 40 })
+          });
+          if (!resp.ok) {
+            const errTxt = await resp.text();
+            throw new Error(errTxt);
+          }
+          const data = await resp.json();
+          const pred = data.prediction;
+          const conf = (data.confidence * 100).toFixed(1);
+          const probs = data.probabilities || {};
+          const exp = data.explanation || {};
+          const tokens = exp.tokens || [];
+          const shap = exp.shap_values || [];
+
+          const chip = document.createElement('span');
+          chip.className = 'chip ' + (pred === 'fake' ? 'fake' : 'real');
+          chip.textContent = pred === 'fake' ? `Fake News (${conf}%)` : `Real News (${conf}%)`;
+          resultEl.appendChild(chip);
+
+          const p = document.createElement('div');
+          p.textContent = `P(real)=${(probs.real*100||0).toFixed(1)}%, P(fake)=${(probs.fake*100||0).toFixed(1)}%`;
+          resultEl.appendChild(p);
+
+          const expl = document.createElement('div');
+          expl.style.marginTop = '10px';
+          expl.innerHTML = '<strong>Explanation (top tokens):</strong><br/>';
+          for (let i=0; i<tokens.length; i++) {
+            const t = document.createElement('span');
+            t.className = 'token';
+            const val = shap[i] || 0;
+            const abs = Math.min(Math.abs(val), 1.0);
+            const bg = val > 0 ? `rgba(244,67,54,${0.15 + abs*0.6})` : `rgba(76,175,80,${0.15 + abs*0.6})`;
+            t.style.background = bg;
+            t.textContent = tokens[i];
+            expl.appendChild(t);
+          }
+          resultEl.appendChild(expl);
+          status.textContent = 'Done.';
+        } catch (e) {
+          status.textContent = 'Error: ' + e.message;
+        }
+      }
+    </script>
+  </body>
+  </html>
+    """
+
+
+class CounterfactualRequest(BaseModel):
+    text: str
+    max_candidates: int = 3
+
+
+@app.post("/predict/counterfactual")
+async def generate_counterfactuals(req: CounterfactualRequest):
+    """Generate simple counterfactuals by removing top SHAP tokens and re-predicting."""
+    try:
+        variants = model_service.generate_counterfactuals(req.text, max_candidates=max(1, req.max_candidates))
+        return {"base_text": req.text, "counterfactuals": variants}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Counterfactual generation error: {str(e)}")
 
 # Analytics endpoints
 @app.get("/analytics/summary")
@@ -384,14 +702,40 @@ async def get_analytics_summary():
         day = article.scraped_at.strftime("%Y-%m-%d")
         daily_counts[day] = daily_counts.get(day, 0) + 1
     
-    return {
+    payload = {
         "total_articles": total_articles,
         "total_sources": len(sources),
         "sources": sources,
         "date_range": date_range,
         "last_7_days": daily_counts,
-        "average_per_day": len(recent_articles) / 7 if recent_articles else 0
+        "average_per_day": len(recent_articles) / 7 if recent_articles else 0,
+        "prediction_monitor": {
+            "count": len(prediction_log),
+            "avg_prob_fake": (sum(x.get("prob_fake", 0.0) for x in prediction_log) / len(prediction_log)) if prediction_log else 0.0,
+            "avg_prob_real": (sum(x.get("prob_real", 0.0) for x in prediction_log) / len(prediction_log)) if prediction_log else 0.0,
+        }
     }
+
+    # Lightweight concept drift check using KS test on P(fake)
+    try:
+        global baseline_fake_probs, baseline_set_at
+        if not baseline_fake_probs and len(recent_fake_probs) >= 500:
+            baseline_fake_probs = list(recent_fake_probs)
+            baseline_set_at = datetime.now().isoformat()
+        elif baseline_fake_probs and len(recent_fake_probs) >= 200:
+            stat, pval = ks_2samp(baseline_fake_probs, list(recent_fake_probs))
+            payload["prediction_monitor"]["drift"] = {
+                "ks_stat": float(stat),
+                "p_value": float(pval),
+                "is_drift": bool(pval < KS_P_THRESHOLD),
+                "baseline_set_at": baseline_set_at,
+                "baseline_size": len(baseline_fake_probs),
+                "recent_size": len(recent_fake_probs),
+            }
+    except Exception:
+        pass
+
+    return payload
 
 if __name__ == "__main__":
     import uvicorn

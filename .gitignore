@@ -5,3 +5,11 @@ app/__pycache__
 .env
 datasets/liar/liar_dataset.zip
 processed_data/*.csv
+/exported-assets/*
+/processed_data/*
+/notebooks/*
+*.md
+app\__pycache__
+app\__pycache__\__init__.cpython-311.pyc
+app\__pycache__\main.cpython-311.pyc
+/datasets/*

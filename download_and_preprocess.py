@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).parent / "app"))
 
 from app.dataset_manager import dataset_manager
 from app.preprocessing import preprocessor
+from app.reports import write_metrics_report
 
 def generate_markdown_report(results: Optional[Dict[str, bool]] = None, 
                            original_df: Optional[pd.DataFrame] = None, 
@@ -423,6 +424,16 @@ async def main():
                 report_type="preprocessing"
             )
             print(f"📊 Detailed preprocessing report saved to: {report_file}")
+
+        # Optional placeholder for metrics report (filled after model training)
+        metrics_placeholder = {
+            "dataset": args.preprocess,
+            "accuracy": "TBD",
+            "f1": "TBD",
+            "notes": "Train model and update this report"
+        }
+        metrics_file = write_metrics_report(metrics_placeholder, output_dir)
+        print(f"📝 Metrics report placeholder: {metrics_file}")
     
     else:
         print("❓ Please specify an action: --download, --dataset, or --preprocess")

@@ -35,6 +35,10 @@ class Settings(BaseSettings):
     # Prediction Settings
     confidence_threshold: float = 0.7
     enable_explanations: bool = True
+    model_name: str = "distilbert-base-uncased-finetuned-sst-2-english"
+    explanation_max_evals: int = 200
+    explanation_enabled_classes: int = 2
+    model_path: Optional[str] = None  # If set, load local fine-tuned model
     
     # Rate Limiting
     requests_per_minute: int = 60
@@ -46,6 +50,8 @@ class Settings(BaseSettings):
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"
+        # Silence pydantic protected namespace warning for fields starting with model_
+        protected_namespaces = ("settings_",)
 
 # Global settings instance
 settings = Settings()
