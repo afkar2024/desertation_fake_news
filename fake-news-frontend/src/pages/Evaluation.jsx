@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { listDatasets, runDatasetEvaluation, listReports } from '../services/api'
+import { listDatasets, runDatasetEvaluation, listReports, getReport } from '../services/api'
 import BaseChart from '../components/charts/BaseChart'
 import { Tab } from '@headlessui/react'
 import clsx from 'clsx'
@@ -10,6 +10,9 @@ import BaselinesPanel from './Evaluation/components/BaselinesPanel'
 import AbstentionPanel from './Evaluation/components/AbstentionPanel'
 import FairnessTable from './Evaluation/components/FairnessTable'
 import TemporalStability from './Evaluation/components/TemporalStability'
+import SignificancePanel from './Evaluation/components/SignificancePanel'
+import CalibrationSummary from './Evaluation/components/CalibrationSummary'
+import Glossary from './Evaluation/components/Glossary'
 import Button from '../components/ui/Button'
 import { useNotifyStore } from '../stores/notifyStore'
 
@@ -57,10 +60,18 @@ export default function Evaluation() {
   const pr = extras?.pr_curve || null
   const baselineAcc = extras?.baseline_accuracy
   const traditionalAcc = extras?.traditional_accuracy
+  const mcnemarB = extras?.mcnemar_b
+  const mcnemarC = extras?.mcnemar_c
+  const mcnemarChi2 = extras?.mcnemar_chi2
+  const mcnemarP = extras?.mcnemar_p
+  const rocAuc = extras?.roc_curve?.auc ?? extras?.roc_auc
+  const prAuc = extras?.pr_curve?.auc ?? extras?.pr_auc
   const abstention = extras?.coverage_accuracy || []
   const fairness = extras?.fairness_groups || null
   const temporal = extras?.temporal_periods || null
   const miMean = extras?.mutual_information_mean
+  const miStd = extras?.mutual_information_std
+  const mcSamples = extras?.mc_dropout_samples
   const expQuality = extras?.explainability_quality_topk_delta_mean
 
   const rocChart = useMemo(() => {
@@ -174,21 +185,67 @@ export default function Evaluation() {
 
       {reports?.length > 0 && (
         <div className="mt-4">
-          <div className="text-sm text-gray-500 mb-2">Recent JSON Evaluation Reports</div>
+          <div className="text-sm text-gray-500 mb-2">Recent Reports</div>
           <div className="flex flex-wrap gap-2">
             {reports.slice(0, 6).map((r) => (
               <Button key={r.id} variant="ghost" onClick={async () => {
                 try {
-                  const item = await fetch(`${import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000'}/reports/${r.id}`).then(res => res.json())
+                  const item = await getReport(r.id)
                   setSelectedReport(item)
+                  if (item?.payload) {
+                    setEvalData(item.payload)
+                  }
                 } catch {}
               }}>{r.report_type} • {r.dataset} • {new Date(r.created_at).toLocaleString()}</Button>
             ))}
           </div>
           {selectedReport && (
             <div className="mt-3 border rounded p-3 bg-white">
-              <div className="text-sm text-gray-500 mb-2">Report JSON</div>
-              <pre className="text-xs whitespace-pre-wrap">{JSON.stringify(selectedReport.payload, null, 2)}</pre>
+              <div className="text-sm text-gray-500 mb-2">Selected Report</div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 text-sm">
+                <div className="border rounded p-3 bg-gray-50">
+                  <div className="text-gray-500">Dataset</div>
+                  <div className="font-semibold">{selectedReport.dataset}</div>
+                </div>
+                <div className="border rounded p-3 bg-gray-50">
+                  <div className="text-gray-500">Type</div>
+                  <div className="font-semibold capitalize">{selectedReport.report_type}</div>
+                </div>
+                <div className="border rounded p-3 bg-gray-50">
+                  <div className="text-gray-500">Created</div>
+                  <div className="font-semibold">{new Date(selectedReport.created_at).toLocaleString()}</div>
+                </div>
+                <div className="border rounded p-3 bg-gray-50">
+                  <div className="text-gray-500">Trace ID</div>
+                  <div className="font-mono truncate" title={selectedReport?.payload?.trace_id || ''}>{selectedReport?.payload?.trace_id || '-'}</div>
+                </div>
+              </div>
+              {selectedReport?.report_type === 'cross_domain' && Array.isArray(selectedReport?.payload?.evaluations) && (
+                <div className="mt-3 overflow-auto">
+                  <table className="min-w-full text-sm">
+                    <thead>
+                      <tr className="text-left text-gray-600">
+                        <th className="p-2">Dataset</th>
+                        <th className="p-2">Samples</th>
+                        <th className="p-2">Accuracy</th>
+                        <th className="p-2">F1</th>
+                        <th className="p-2">Baseline Acc</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {selectedReport.payload.evaluations.map((ev, i) => (
+                        <tr key={i} className="border-t">
+                          <td className="p-2">{ev.dataset}</td>
+                          <td className="p-2">{ev.size}</td>
+                          <td className="p-2">{ev.accuracy ?? '-'}</td>
+                          <td className="p-2">{ev.f1 ?? '-'}</td>
+                          <td className="p-2">{ev.baseline_accuracy ?? '-'}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -215,6 +272,59 @@ export default function Evaluation() {
                 </div>
               </div>
             )}
+            <div className="mt-4">
+              <CalibrationSummary brier={extras?.brier_score} ece={extras?.ece} rocAuc={rocAuc} prAuc={prAuc} />
+            </div>
+            {(mcnemarB != null || mcnemarC != null || mcnemarChi2 != null || mcnemarP != null) && (
+              <div className="mt-4">
+                <SignificancePanel b={mcnemarB} c={mcnemarC} chi2={mcnemarChi2} p={mcnemarP} />
+              </div>
+            )}
+            {(baselineAcc != null || traditionalAcc != null || extras?.baseline_precision != null || extras?.traditional_precision != null) && (
+              <div className="mt-4 bg-white border rounded p-4">
+                <div className="text-sm font-semibold mb-2">Baseline & Traditional Details</div>
+                <div className="overflow-auto">
+                  <table className="min-w-[520px] text-sm">
+                    <thead>
+                      <tr className="text-left text-gray-600">
+                        <th className="p-2">Model</th>
+                        <th className="p-2">Accuracy</th>
+                        <th className="p-2">Precision</th>
+                        <th className="p-2">Recall</th>
+                        <th className="p-2">F1</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr className="border-t">
+                        <td className="p-2">This Model</td>
+                        <td className="p-2">{metrics.accuracy ?? '-'}</td>
+                        <td className="p-2">{metrics.precision ?? '-'}</td>
+                        <td className="p-2">{metrics.recall ?? '-'}</td>
+                        <td className="p-2">{metrics.f1 ?? '-'}</td>
+                      </tr>
+                      {(baselineAcc != null || extras?.baseline_precision != null) && (
+                        <tr className="border-t">
+                          <td className="p-2">Heuristic Baseline</td>
+                          <td className="p-2">{baselineAcc ?? '-'}</td>
+                          <td className="p-2">{extras?.baseline_precision ?? '-'}</td>
+                          <td className="p-2">{extras?.baseline_recall ?? '-'}</td>
+                          <td className="p-2">{extras?.baseline_f1 ?? '-'}</td>
+                        </tr>
+                      )}
+                      {(traditionalAcc != null || extras?.traditional_precision != null) && (
+                        <tr className="border-t">
+                          <td className="p-2">Traditional (TF-IDF + LR)</td>
+                          <td className="p-2">{traditionalAcc ?? '-'}</td>
+                          <td className="p-2">{extras?.traditional_precision ?? '-'}</td>
+                          <td className="p-2">{extras?.traditional_recall ?? '-'}</td>
+                          <td className="p-2">{extras?.traditional_f1 ?? '-'}</td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
           </Tab.Panel>
           <Tab.Panel>
             <CurvesPanel roc={extras?.roc_curve || null} pr={extras?.pr_curve || null} calibration={{ bins: extras?.reliability_bins || [] }} />
@@ -237,6 +347,20 @@ export default function Evaluation() {
                   <div className="text-2xl font-semibold">{miMean?.toFixed?.(4)}</div>
                 </div>
               )}
+              {miStd != null && (
+                <div className="bg-white border rounded p-4">
+                  <div className="text-sm font-semibold mb-2">MC Dropout (MI Std)</div>
+                  <div className="text-xs text-gray-500 mb-2">Dispersion of mutual information over samples.</div>
+                  <div className="text-2xl font-semibold">{miStd?.toFixed?.(4)}</div>
+                </div>
+              )}
+              {mcSamples != null && (
+                <div className="bg-white border rounded p-4">
+                  <div className="text-sm font-semibold mb-2">MC Samples</div>
+                  <div className="text-xs text-gray-500 mb-2">Number of stochastic forward passes.</div>
+                  <div className="text-2xl font-semibold">{mcSamples}</div>
+                </div>
+              )}
               {expQuality != null && (
                 <div className="bg-white border rounded p-4">
                   <div className="text-sm font-semibold mb-2">Explanation Quality (Deletion)</div>
@@ -248,6 +372,29 @@ export default function Evaluation() {
             <div className="mt-4">
               <AbstentionPanel curve={abstention} />
             </div>
+            {Array.isArray(abstention) && abstention.length > 0 && (
+              <div className="mt-3 bg-white border rounded p-4 overflow-auto">
+                <div className="text-sm font-semibold mb-2">Coverage-Accuracy Table</div>
+                <table className="min-w-[360px] text-sm">
+                  <thead>
+                    <tr className="text-left text-gray-600">
+                      <th className="p-2">Coverage</th>
+                      <th className="p-2">Accuracy</th>
+                      <th className="p-2">N</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {abstention.map((row, i) => (
+                      <tr key={i} className="border-t">
+                        <td className="p-2">{row.coverage}</td>
+                        <td className="p-2">{row.accuracy}</td>
+                        <td className="p-2">{row.n}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
           </Tab.Panel>
           <Tab.Panel>
             {reports?.length > 0 ? (
@@ -265,8 +412,108 @@ export default function Evaluation() {
                 {selectedReport && (
                   <div className="border rounded p-4 bg-white">
                     <div className="text-sm text-gray-500 mb-2">Selected Report</div>
-                    <div className="text-xs text-gray-500 mb-1">Dataset: {selectedReport.dataset} | Type: {selectedReport.report_type} | Created: {new Date(selectedReport.created_at).toLocaleString()}</div>
-                    <pre className="text-xs whitespace-pre-wrap">{JSON.stringify(selectedReport.payload, null, 2)}</pre>
+                    <div className="text-xs text-gray-500 mb-3">Dataset: {selectedReport.dataset} | Type: {selectedReport.report_type} | Created: {new Date(selectedReport.created_at).toLocaleString()}</div>
+                    {selectedReport?.report_type === 'evaluation' && (
+                      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                        <div className="border rounded p-3 bg-gray-50">
+                          <div className="text-gray-500 text-xs">Total Evaluated</div>
+                          <div className="text-lg font-semibold">{selectedReport?.payload?.total_evaluated ?? '-'}</div>
+                        </div>
+                        <div className="border rounded p-3 bg-gray-50">
+                          <div className="text-gray-500 text-xs">Accuracy</div>
+                          <div className="text-lg font-semibold">{selectedReport?.payload?.accuracy ?? '-'}</div>
+                        </div>
+                        <div className="border rounded p-3 bg-gray-50">
+                          <div className="text-gray-500 text-xs">F1</div>
+                          <div className="text-lg font-semibold">{selectedReport?.payload?.f1 ?? '-'}</div>
+                        </div>
+                        <div className="border rounded p-3 bg-gray-50">
+                          <div className="text-gray-500 text-xs">Trace ID</div>
+                          <div className="text-xs font-mono truncate" title={selectedReport?.payload?.trace_id || ''}>{selectedReport?.payload?.trace_id || '-'}</div>
+                        </div>
+                      </div>
+                    )}
+                    {selectedReport?.report_type === 'cross_domain' && Array.isArray(selectedReport?.payload?.evaluations) && (
+                      <div className="overflow-auto">
+                        <table className="min-w-full text-sm">
+                          <thead>
+                            <tr className="text-left text-gray-600">
+                              <th className="p-2">Dataset</th>
+                              <th className="p-2">Samples</th>
+                              <th className="p-2">Accuracy</th>
+                              <th className="p-2">F1</th>
+                              <th className="p-2">Baseline Acc</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {selectedReport.payload.evaluations.map((ev, i) => (
+                              <tr key={i} className="border-t">
+                                <td className="p-2">{ev.dataset}</td>
+                                <td className="p-2">{ev.size}</td>
+                                <td className="p-2">{ev.accuracy ?? '-'}</td>
+                                <td className="p-2">{ev.f1 ?? '-'}</td>
+                                <td className="p-2">{ev.baseline_accuracy ?? '-'}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                    {selectedReport?.report_type === 'full_pipeline' && selectedReport?.payload && (
+                      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                        <div className="border rounded p-3 bg-gray-50">
+                          <div className="text-gray-500 text-xs">Original Records</div>
+                          <div className="text-lg font-semibold">{selectedReport?.payload?.original_records ?? '-'}</div>
+                        </div>
+                        <div className="border rounded p-3 bg-gray-50">
+                          <div className="text-gray-500 text-xs">Processed Records</div>
+                          <div className="text-lg font-semibold">{selectedReport?.payload?.processed_records ?? '-'}</div>
+                        </div>
+                        <div className="border rounded p-3 bg-gray-50">
+                          <div className="text-gray-500 text-xs">Final Records</div>
+                          <div className="text-lg font-semibold">{selectedReport?.payload?.final_records ?? '-'}</div>
+                        </div>
+                        <div className="border rounded p-3 bg-gray-50">
+                          <div className="text-gray-500 text-xs">Features Added</div>
+                          <div className="text-lg font-semibold">{selectedReport?.payload?.features_added ?? '-'}</div>
+                        </div>
+                        <div className="border rounded p-3 bg-gray-50">
+                          <div className="text-gray-500 text-xs">Balance Strategy</div>
+                          <div className="text-lg font-semibold">{selectedReport?.payload?.balance_strategy ?? '-'}</div>
+                        </div>
+                        <div className="sm:col-span-2 lg:col-span-3 border rounded p-3">
+                          <div className="text-gray-500 text-xs mb-1">Files</div>
+                          <div className="text-xs font-mono break-all">{JSON.stringify(selectedReport?.payload?.files_generated || {}, null, 2)}</div>
+                        </div>
+                      </div>
+                    )}
+                    {selectedReport?.report_type === 'evaluation' && selectedReport?.payload && (
+                      <div className="mt-3">
+                        {selectedReport?.payload?.extra_metrics?.shap_samples_json && (
+                          <div className="text-xs text-gray-500">SHAP JSON: {selectedReport.payload.extra_metrics.shap_samples_json}</div>
+                        )}
+                        {selectedReport?.payload?.extra_metrics?.shap_samples_markdown && (
+                          <div className="text-xs text-gray-500">SHAP Markdown: {selectedReport.payload.extra_metrics.shap_samples_markdown}</div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
+                {selectedReport && (
+                  <div className="mt-3">
+                    <Glossary items={[
+                      { term: 'Accuracy', desc: 'Fraction of correct predictions over all predictions.' },
+                      { term: 'Precision', desc: 'Among predicted positives, how many are truly positive.' },
+                      { term: 'Recall', desc: 'Among true positives, how many are correctly identified.' },
+                      { term: 'F1', desc: 'Harmonic mean of Precision and Recall.' },
+                      { term: 'ROC-AUC', desc: 'Area under the ROC curve (higher is better).' },
+                      { term: 'PR-AUC', desc: 'Area under the Precision-Recall curve (higher is better).' },
+                      { term: 'Brier Score', desc: 'Mean squared error of predicted probabilities (lower is better).' },
+                      { term: 'ECE', desc: 'Expected Calibration Error (lower is better).' },
+                      { term: 'Coverage-Accuracy', desc: 'Accuracy measured at different coverage thresholds based on model confidence.' },
+                      { term: "McNemar's Test", desc: 'Statistical test comparing two classifiers on paired data; p < 0.05 indicates significance.' },
+                      { term: 'Mutual Information', desc: 'Epistemic uncertainty estimate via MC Dropout.' }
+                    ]} />
                   </div>
                 )}
               </div>

@@ -315,6 +315,18 @@ class ModelService:
             return {"features": [], "weights": []}
         if self._lime_explainer is None:
             self._lime_explainer = LimeTextExplainer(class_names=["real", "fake"])  # type: ignore
+        try:
+            exp = self._lime_explainer.explain_instance(
+                text,
+                lambda xs: self._predict_proba(xs),
+                num_features=max(1, num_features),
+            )
+            feats = exp.as_list()
+            features = [f for f, _ in feats]
+            weights = [float(w) for _, w in feats]
+            return {"features": features, "weights": weights}
+        except Exception:
+            return {"features": [], "weights": []}
 
     def explain_text_attention(
         self,

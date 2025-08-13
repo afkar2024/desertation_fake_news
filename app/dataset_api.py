@@ -61,6 +61,7 @@ class FullPipelineRequest(BaseModel):
     balance_strategy: Optional[str] = None  # 'undersample', 'oversample', or None
     download_if_missing: bool = True
     return_markdown: bool = False
+    save_report: bool = False
 
 def generate_markdown_report_api(results: Optional[Dict[str, bool]] = None, 
                                original_df: Optional[pd.DataFrame] = None, 
@@ -497,6 +498,12 @@ async def evaluate_cross_domain(request: CrossDomainEvaluateRequest, trace_id: O
     trace = cache_put(trace_id=trace_id, dataset="multi", process="cross_domain", params_hash=params_hash, dataset_fingerprint=dataset_fp, payload=payload)
     payload["trace_id"] = trace
     payload["cached"] = False
+    # Persist JSON report if requested
+    try:
+        if request.save_report:
+            add_report(dataset="multi", report_type="cross_domain", payload=payload)
+    except Exception:
+        pass
     return payload
 
 
@@ -886,6 +893,12 @@ async def full_pipeline_processing(
         trace = cache_put(trace_id=trace_id, dataset=dataset_name, process="full_pipeline", params_hash=params_hash, dataset_fingerprint=dataset_fp, payload=response_payload)
         response_payload["trace_id"] = trace
         response_payload["cached"] = False
+        # Persist JSON report if requested
+        try:
+            if request.save_report:
+                add_report(dataset=dataset_name, report_type="full_pipeline", payload=response_payload)
+        except Exception:
+            pass
         return response_payload
     
     except Exception as e:
@@ -1630,6 +1643,8 @@ async def evaluate_model_on_dataset(dataset_name: str, request: EvaluateModelReq
             dataset_fingerprint=dataset_fp,
             payload=cache_payload,
         )
+        # Attach trace_id to payload persisted to reports table
+        cache_payload["trace_id"] = trace
         try:
             if request.save_report:
                 add_report(dataset=dataset_name, report_type="evaluation", payload=cache_payload)

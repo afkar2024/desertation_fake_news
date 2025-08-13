@@ -592,9 +592,11 @@ async def predict_with_explanation(request: PredictExplainRequest):
             exp_preview = {"explanation_confidence": ec}
         elif request.use_attention:
             exp = model_service.explain_text_attention(request.text)
+            if not isinstance(exp, dict):
+                exp = {"tokens": [], "weights": []}
             # return top tokens by weight
-            tokens = exp.get("tokens", [])
-            weights = exp.get("weights", [])
+            tokens = exp.get("tokens", []) if isinstance(exp, dict) else []
+            weights = exp.get("weights", []) if isinstance(exp, dict) else []
             # pair and sort
             pairs = list(zip(tokens, weights))
             pairs_sorted = sorted(pairs, key=lambda x: x[1], reverse=True)[: max(1, request.top_tokens)]
@@ -604,6 +606,8 @@ async def predict_with_explanation(request: PredictExplainRequest):
             }
         elif request.use_lime:
             exp = model_service.explain_text_lime(request.text, num_features=max(1, request.top_tokens))
+            if not isinstance(exp, dict):
+                exp = {"features": [], "weights": []}
             exp_preview = {"features": exp.get("features", [])[: max(1, request.top_tokens)], "weights": exp.get("weights", [])[: max(1, request.top_tokens)]}
         else:
             exp = model_service.explain_text(request.text, max_evals=request.max_evals)

@@ -39,13 +39,14 @@ export const predictCounterfactual = (payload) => apiClient.post('/predict/count
 export const listDatasets = () => apiClient.get('/datasets').then(r => r.data)
 export const getDatasetInfo = (name) => apiClient.get(`/datasets/${name}/info`).then(r => r.data)
 export const getDatasetSample = (name, size = 5) => apiClient.get(`/datasets/${name}/sample`, { params: { size } }).then(r => r.data)
-export const runFullPipeline = (name) => apiClient.post(`/datasets/full-pipeline/${name}`).then(r => r.data)
+export const runFullPipeline = (name, body = {}) => apiClient.post(`/datasets/full-pipeline/${name}`, body).then(r => r.data)
 export const runCrossDomainEvaluation = (body = {}) => apiClient.post('/datasets/evaluate/cross-domain', body, { timeout: 180000 }).then(r => r.data)
 export const runDatasetEvaluation = (name, body = {}) => apiClient.post(`/datasets/evaluate/${name}`, body, { timeout: 180000 }).then(r => r.data)
 
 // Reports
 export const listReports = () => apiClient.get('/reports').then(r => r.data)
 export const getReportMarkdown = (filename) => apiClient.get(`/reports/${encodeURIComponent(filename)}`, { responseType: 'text' }).then(r => r.data)
+export const getReport = (id) => apiClient.get(`/reports/${id}`).then(r => r.data)
 
 // Feedback
 export const listFeedback = () => apiClient.get('/feedback/').then(r => r.data)
