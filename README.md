@@ -1,3 +1,184 @@
+### Adaptive Fake News Detection System — Setup and Run Guide
+
+This guide walks you through requirements, installation, starting backend and frontend, and using the key API routes.
+
+### 1) Requirements
+
+- Python 3.9–3.11 (recommended 3.10)
+- Node.js 18+ and npm 9+
+- Git
+- OS: Windows, macOS, or Linux
+
+Optional (for specific features):
+- Internet access to download the Hugging Face model on first run
+
+### 2) Clone the repository
+
+```bash
+git clone https://github.com/your-org/desertation_fake_news.git
+cd desertation_fake_news
+```
+
+### 3) Backend setup
+
+Create and activate a virtual environment, then install deps.
+
+Windows (PowerShell):
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install --upgrade pip
+pip install -r requirements.txt
+```
+
+macOS/Linux:
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip
+pip install -r requirements.txt
+```
+
+Environment variables (optional):
+- Copy `env.example` to `.env` and adjust if needed (e.g., model settings, API keys).
+
+Start the backend API:
+```bash
+python start_server.py
+# Server: http://127.0.0.1:8000
+```
+
+Stop the backend:
+```bash
+python stop_server.py
+```
+
+Notes:
+- The app creates `processed_data/cache.db` (SQLite) for cached results and JSON reports, and writes artifacts under `processed_data/`.
+- First model load may download weights from Hugging Face.
+
+### 4) Frontend setup
+
+In a separate terminal:
+```bash
+cd fake-news-frontend
+npm install
+```
+
+Configure API base URL (optional; defaults to `http://127.0.0.1:8000`):
+Create `fake-news-frontend/.env`:
+```
+VITE_API_BASE_URL=http://127.0.0.1:8000
+```
+
+Start the frontend dev server:
+```bash
+npm run dev
+# Frontend: http://127.0.0.1:5173
+```
+
+### 5) Quick health check
+
+Backend:
+```bash
+curl http://127.0.0.1:8000/health
+```
+
+Frontend:
+- Open `http://127.0.0.1:5173` in your browser.
+
+### 6) How to use the app (routes and flows)
+
+High-level UI routes:
+- Dashboard: system status and analytics
+- Analysis: predict on pasted text or URL
+- Explainability: SHAP, LIME, Attention, Counterfactuals
+- Datasets: dataset listing, samples, pipeline
+- Evaluation: run evaluations, view saved JSON reports
+
+Key API routes and examples
+
+- Health and info
+```bash
+curl http://127.0.0.1:8000/health
+curl http://127.0.0.1:8000/model/info
+```
+
+- Predictions
+```bash
+# Single text prediction
+curl -X POST http://127.0.0.1:8000/predict -H "Content-Type: application/json" -d '{"text":"your news text"}'
+
+# From URL
+curl -X POST http://127.0.0.1:8000/predict/url -H "Content-Type: application/json" -d '{"url":"https://example.com/article"}'
+
+# Predict + Explain (choose one: SHAP default, LIME, Attention)
+curl -X POST http://127.0.0.1:8000/predict/explain -H "Content-Type: application/json" -d '{"text":"your news text","use_lime":false,"use_attention":false}'
+curl -X POST http://127.0.0.1:8000/predict/explain -H "Content-Type: application/json" -d '{"text":"your news text","use_lime":true}'
+curl -X POST http://127.0.0.1:8000/predict/explain -H "Content-Type: application/json" -d '{"text":"your news text","use_attention":true}'
+
+# Counterfactuals
+curl -X POST http://127.0.0.1:8000/predict/counterfactual -H "Content-Type: application/json" -d '{"text":"your news text"}'
+```
+
+- Datasets
+```bash
+# List datasets
+curl http://127.0.0.1:8000/datasets
+
+# Dataset info and sample
+curl http://127.0.0.1:8000/datasets/liar/info
+curl "http://127.0.0.1:8000/datasets/liar/sample?size=5"
+
+# Full pipeline (preprocess + save); persist JSON report if desired
+curl -X POST http://127.0.0.1:8000/datasets/full-pipeline/liar -H "Content-Type: application/json" -d '{"download_if_missing":true, "save_report":true}'
+
+# Cross-domain evaluation and single-dataset evaluation
+curl -X POST http://127.0.0.1:8000/datasets/evaluate/cross-domain -H "Content-Type: application/json" -d '{"datasets":["liar","politifact"],"limit":1000, "save_report":true}'
+curl -X POST http://127.0.0.1:8000/datasets/evaluate/liar -H "Content-Type: application/json" -d '{"limit":1000, "compare_traditional":true, "abstention_curve":true, "explainability_quality":true, "mc_dropout_samples":30, "save_report":true}'
+```
+
+- Reports
+```bash
+# List JSON reports saved in DB (evaluation, cross_domain, full_pipeline)
+curl http://127.0.0.1:8000/reports
+
+# Get a single report by id
+curl http://127.0.0.1:8000/reports/1
+```
+
+### 7) Using the frontend pages
+
+- Dashboard: Confirms API status; shows analytics summary and latest evaluation (if any).
+- Analysis: Paste text or URL, run prediction; see probabilities and uncertainty.
+- Explainability:
+  - SHAP: token bar chart and top positive/negative contributors
+  - LIME: feature bar chart and top positive/negative features
+  - Attention: token heat chips + top attention bar chart
+  - Counterfactuals: variants with prediction shifts
+- Datasets: list datasets, preview samples, run full pipeline.
+- Evaluation: run evaluations; saved reports appear in the list and render in rich components (metrics, curves, calibration, significance, baselines, uncertainty, coverage tables; cross-domain and pipeline summaries when applicable).
+
+### 8) Troubleshooting
+
+- Model download issues: ensure internet access on first run; re-run `python start_server.py`.
+- Attention explanations 500: some models do not expose attentions. Use SHAP/LIME, or reload a model with attentions.
+- CORS: dev mode allows `*`. If you change hosts/ports, set `VITE_API_BASE_URL` accordingly.
+- Node or Python not found: verify versions and PATH.
+
+### 9) Project layout (quick reference)
+
+```
+app/                    # FastAPI backend
+fake-news-frontend/     # React frontend (Vite)
+processed_data/         # Outputs, cache.db for JSON reports, artifacts
+scripts/                # Utilities for training/evaluation pipeline
+```
+
+### 10) Production notes (out of scope for dissertation)
+
+- No auth/rate limiting; DB is SQLite for demo; no background queue. See docs for roadmap.
+
 # Adaptive Fake News Detector
 
 A comprehensive FastAPI backend for real-time news data collection and fake news detection from multiple sources.
