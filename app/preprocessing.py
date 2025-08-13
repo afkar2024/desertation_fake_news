@@ -20,7 +20,6 @@ import nltk
 from nltk.corpus import stopwords
 from nltk.tokenize import word_tokenize, sent_tokenize
 from nltk.stem import WordNetLemmatizer
-import textstat  # type: ignore
 from textblob import TextBlob  # type: ignore
 from transformers import AutoTokenizer
 from sklearn.utils import resample
@@ -202,6 +201,13 @@ class TextPreprocessor:
             }
         
         try:
+            # Lazy import to avoid startup failures if textstat/pyphen is problematic
+            try:
+                import textstat  # type: ignore
+            except Exception as imp_err:
+                logger.warning(f"textstat unavailable, skipping readability features: {imp_err}")
+                raise
+
             # Calculate readability scores using textstat
             fk_grade = textstat.flesch_kincaid_grade(text)  # type: ignore
             fk_ease = textstat.flesch_reading_ease(text)  # type: ignore

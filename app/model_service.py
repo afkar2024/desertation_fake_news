@@ -33,6 +33,12 @@ class ModelService:
         self.temperature: float = 1.0
 
     def classify_text(self, text: str) -> Dict[str, Any]:
+        # Normalize to plain string
+        if not isinstance(text, str):
+            try:
+                text = str(text)
+            except Exception:
+                text = ""
         if not text or not text.strip():
             return {
                 "prediction": 0,
@@ -40,13 +46,22 @@ class ModelService:
                 "probabilities": {"real": 0.5, "fake": 0.5},
             }
 
-        inputs = self.tokenizer(
-            text,
-            return_tensors="pt",
-            truncation=True,
-            max_length=512,
-            padding=False,
-        )
+        try:
+            inputs = self.tokenizer(
+                text,
+                return_tensors="pt",
+                truncation=True,
+                max_length=512,
+                padding=False,
+            )
+        except Exception:
+            # As an extreme fallback, return neutral prediction instead of error
+            return {
+                "prediction": 0,
+                "confidence": 0.5,
+                "probabilities": {"real": 0.5, "fake": 0.5},
+                "uncertainty": {"predictive_entropy": float(np.log(2.0)), "margin": 0.0},
+            }
         inputs = {k: v.to(self.device) for k, v in inputs.items()}
 
         with torch.no_grad():
@@ -81,13 +96,24 @@ class ModelService:
         # Normalize any incoming structure to a clean list of strings
         texts_norm = self._to_list_of_strings(texts)
 
-        encodings = self.tokenizer(
-            texts_norm,
-            return_tensors="pt",
-            truncation=True,
-            max_length=256,
-            padding=True,
-        )
+        try:
+            encodings = self.tokenizer(
+                texts_norm,
+                return_tensors="pt",
+                truncation=True,
+                max_length=256,
+                padding=True,
+            )
+        except Exception:
+            # Fallback: coerce everything to plain strings
+            texts_norm = [str(x) for x in texts_norm]
+            encodings = self.tokenizer(
+                texts_norm,
+                return_tensors="pt",
+                truncation=True,
+                max_length=256,
+                padding=True,
+            )
         encodings = {k: v.to(self.device) for k, v in encodings.items()}
 
         with torch.no_grad():
@@ -121,13 +147,23 @@ class ModelService:
         if not texts:
             return np.zeros((0, self.num_labels), dtype=float)
         texts_norm = self._to_list_of_strings(texts)
-        encodings = self.tokenizer(
-            texts_norm,
-            return_tensors="pt",
-            truncation=True,
-            max_length=256,
-            padding=True,
-        )
+        try:
+            encodings = self.tokenizer(
+                texts_norm,
+                return_tensors="pt",
+                truncation=True,
+                max_length=256,
+                padding=True,
+            )
+        except Exception:
+            texts_norm = [str(x) for x in texts_norm]
+            encodings = self.tokenizer(
+                texts_norm,
+                return_tensors="pt",
+                truncation=True,
+                max_length=256,
+                padding=True,
+            )
         encodings = {k: v.to(self.device) for k, v in encodings.items()}
         with torch.no_grad():
             outputs = self.model(**encodings)
@@ -140,13 +176,23 @@ class ModelService:
         if not texts:
             return np.zeros((0, self.num_labels), dtype=float)
         texts_norm = self._to_list_of_strings(texts)
-        encodings = self.tokenizer(
-            texts_norm,
-            return_tensors="pt",
-            truncation=True,
-            max_length=256,
-            padding=True,
-        )
+        try:
+            encodings = self.tokenizer(
+                texts_norm,
+                return_tensors="pt",
+                truncation=True,
+                max_length=256,
+                padding=True,
+            )
+        except Exception:
+            texts_norm = [str(x) for x in texts_norm]
+            encodings = self.tokenizer(
+                texts_norm,
+                return_tensors="pt",
+                truncation=True,
+                max_length=256,
+                padding=True,
+            )
         encodings = {k: v.to(self.device) for k, v in encodings.items()}
         with torch.no_grad():
             outputs = self.model(**encodings)
@@ -213,46 +259,51 @@ class ModelService:
         if not text or not text.strip():
             return {"tokens": [], "shap_values": [], "base_value": 0.0}
 
-        if self._explainer is None:
-            # Use a regex-based text masker to ensure inputs remain plain strings
-            # This avoids incompatibilities with certain SHAP + HF tokenizer versions.
-            text_masker = shap.maskers.Text(r"\W+")  # split on non-word boundaries
-            self._explainer = shap.Explainer(self._predict_proba, text_masker)
-
-        evals = max_evals if max_evals is not None else settings.explanation_max_evals
-        sv = self._explainer([text], max_evals=evals)
-
-        # Extract tokens
-        tokens: List[str]
         try:
-            tokens = list(sv.data[0])  # type: ignore[attr-defined]
-        except Exception:
-            tokens = self.tokenizer.tokenize(text)
+            if self._explainer is None:
+                # Use a regex-based text masker to ensure inputs remain plain strings
+                # This avoids incompatibilities with certain SHAP + HF tokenizer versions.
+                text_masker = shap.maskers.Text(r"\W+")  # split on non-word boundaries
+                self._explainer = shap.Explainer(self._predict_proba, text_masker)
 
-        # Extract values for class index 1 if available
-        values_arr = sv.values
-        base_arr = sv.base_values
-        if isinstance(values_arr, np.ndarray):
-            if values_arr.ndim == 3:  # [samples, tokens, classes]
-                shap_vals = values_arr[0, :, 1 if self.num_labels > 1 else 0].tolist()
-            elif values_arr.ndim == 2:  # [samples, tokens]
-                shap_vals = values_arr[0, :].tolist()
+            evals = max_evals if max_evals is not None else settings.explanation_max_evals
+            sv = self._explainer([text], max_evals=evals)
+
+            # Extract tokens
+            tokens: List[str]
+            try:
+                tokens = list(sv.data[0])  # type: ignore[attr-defined]
+            except Exception:
+                tokens = self.tokenizer.tokenize(text)
+
+            # Extract values for class index 1 if available
+            values_arr = sv.values
+            base_arr = sv.base_values
+            if isinstance(values_arr, np.ndarray):
+                if values_arr.ndim == 3:  # [samples, tokens, classes]
+                    shap_vals = values_arr[0, :, 1 if self.num_labels > 1 else 0].tolist()
+                elif values_arr.ndim == 2:  # [samples, tokens]
+                    shap_vals = values_arr[0, :].tolist()
+                else:
+                    shap_vals = []
             else:
                 shap_vals = []
-        else:
-            shap_vals = []
 
-        if isinstance(base_arr, np.ndarray):
-            if base_arr.ndim == 2:  # [samples, classes]
-                base_value = float(base_arr[0, 1 if self.num_labels > 1 else 0])
-            elif base_arr.ndim == 1:
-                base_value = float(base_arr[0])
+            if isinstance(base_arr, np.ndarray):
+                if base_arr.ndim == 2:  # [samples, classes]
+                    base_value = float(base_arr[0, 1 if self.num_labels > 1 else 0])
+                elif base_arr.ndim == 1:
+                    base_value = float(base_arr[0])
+                else:
+                    base_value = 0.0
             else:
                 base_value = 0.0
-        else:
-            base_value = 0.0
 
-        return {"tokens": tokens, "shap_values": shap_vals, "base_value": base_value}
+            return {"tokens": tokens, "shap_values": shap_vals, "base_value": base_value}
+        except Exception:
+            # Fallback: return tokenizer tokens with zero weights instead of erroring out
+            safe_tokens = self.tokenizer.tokenize(text)
+            return {"tokens": safe_tokens, "shap_values": [0.0] * len(safe_tokens), "base_value": 0.0}
 
     def explain_text_lime(self, text: str, num_features: int = 10) -> Dict[str, Any]:
         """LIME explanation at feature-level (word n-grams). Best-effort if LIME available."""
@@ -343,13 +394,21 @@ class ModelService:
         # Already a list/tuple/np.ndarray
         if isinstance(inputs, (list, tuple, np.ndarray)):
             result: List[str] = []
-            for item in inputs:
+            for item in list(inputs):
                 if isinstance(item, str):
                     result.append(item)
                 elif isinstance(item, (list, tuple, np.ndarray)):
-                    # pretokenized tokens -> join into a string
+                    # pretokenized tokens or nested arrays -> join into a string
                     try:
-                        result.append(" ".join(map(str, list(item))))
+                        flat_tokens: List[str] = []
+                        for tok in list(item):
+                            if isinstance(tok, str):
+                                flat_tokens.append(tok)
+                            elif isinstance(tok, (list, tuple, np.ndarray)):
+                                flat_tokens.extend([str(t) for t in list(tok)])
+                            else:
+                                flat_tokens.append(str(tok))
+                        result.append(" ".join(flat_tokens))
                     except Exception:
                         result.append(str(item))
                 else:
