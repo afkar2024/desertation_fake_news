@@ -277,7 +277,43 @@ The dataset includes:
     
     def list_datasets(self) -> Dict[str, Dict]:
         """List all available datasets with their metadata"""
-        return self.metadata
+        # If no metadata exists, return available dataset info
+        if not self.metadata:
+            available_datasets = {}
+            for name, info in self.datasets.items():
+                available_datasets[name] = {
+                    "name": info["name"],
+                    "description": info["description"],
+                    "status": "not_downloaded",
+                    "available": True,
+                    "download_required": True
+                }
+            return available_datasets
+        
+        # Return existing metadata with additional info
+        result = {}
+        for name, info in self.datasets.items():
+            if name in self.metadata:
+                # Dataset exists
+                result[name] = {
+                    **self.metadata[name],
+                    "name": info["name"],
+                    "description": info["description"],
+                    "status": self.metadata[name].get("status", "downloaded"),
+                    "available": True,
+                    "download_required": False
+                }
+            else:
+                # Dataset not downloaded yet
+                result[name] = {
+                    "name": info["name"],
+                    "description": info["description"],
+                    "status": "not_downloaded",
+                    "available": True,
+                    "download_required": True
+                }
+        
+        return result
     
     def get_dataset_path(self, dataset_name: str) -> Optional[Path]:
         """Get the local path for a dataset"""

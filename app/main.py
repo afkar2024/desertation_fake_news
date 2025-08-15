@@ -94,6 +94,25 @@ KS_P_THRESHOLD: float = 0.01
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
+    print("🚀 Initializing Adaptive Fake News Detector...")
+    
+    # Initialize datasets if they don't exist
+    try:
+        from .dataset_manager import dataset_manager
+        print("📊 Checking dataset availability...")
+        
+        # Check if any datasets exist
+        if not dataset_manager.metadata:
+            print("📥 No datasets found. Downloading initial datasets...")
+            # Download datasets in background
+            import asyncio
+            asyncio.create_task(download_initial_datasets())
+        else:
+            print(f"✅ Found {len(dataset_manager.metadata)} datasets")
+            
+    except Exception as e:
+        print(f"⚠️  Dataset initialization warning: {e}")
+    
     sample_sources = [
         DataSource(
             name="NewsAPI General",
@@ -123,6 +142,23 @@ async def lifespan(app: FastAPI):
     
     # Shutdown (if needed)
     pass
+
+async def download_initial_datasets():
+    """Download initial datasets in background"""
+    try:
+        from .dataset_manager import dataset_manager
+        print("🔄 Downloading initial datasets in background...")
+        
+        # Download datasets that don't require manual intervention
+        success = dataset_manager.fetch_politifact_data()
+        if success:
+            print("✅ PolitiFact dataset downloaded")
+        
+        # Note: LIAR dataset requires internet download, FakeNewsNet requires manual setup
+        print("💡 For full dataset access, run: python download_and_preprocess.py --download")
+        
+    except Exception as e:
+        print(f"❌ Background dataset download failed: {e}")
 
 # Initialize FastAPI app with lifespan
 app = FastAPI(
