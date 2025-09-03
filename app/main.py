@@ -1,6 +1,8 @@
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, Response, JSONResponse
+from starlette.middleware.base import BaseHTTPMiddleware
+import time
 import traceback
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
@@ -18,7 +20,7 @@ from pydantic_settings import BaseSettings
 from collections import deque
 from scipy.stats import ks_2samp
 from app.dataset_api import router as dataset_router
-from app.model_service import model_service
+from app.model_service_instance import model_service
 from app.feedback_api import router as feedback_router
 from app.eval_progress import progress_manager
 from fastapi import WebSocket, WebSocketDisconnect
@@ -79,6 +81,23 @@ class PredictExplainRequest(BaseModel):
     use_lime: bool = False
     use_attention: bool = False
     explanation_confidence: bool = False
+
+# Timeout middleware for long-running requests
+class TimeoutMiddleware(BaseHTTPMiddleware):
+    def __init__(self, app, timeout: float = 600.0):  # 10 minutes default timeout
+        super().__init__(app)
+        self.timeout = timeout
+
+    async def dispatch(self, request: Request, call_next):
+        try:
+            return await asyncio.wait_for(call_next(request), timeout=self.timeout)
+        except asyncio.TimeoutError:
+            return JSONResponse(
+                status_code=504,
+                content={"detail": f"Request timeout after {self.timeout} seconds"}
+            )
+
+# Model service is now imported from shared instance
 
 # In-memory storage (replace with database in production)
 articles_db: List[NewsArticle] = []
@@ -192,6 +211,9 @@ async def global_exception_handler(request, exc: Exception):
         "error": str(exc),
         "location": location,
     })
+
+# Add timeout middleware for long-running requests
+app.add_middleware(TimeoutMiddleware, timeout=600.0)  # 10 minutes timeout
 
 # Add CORS middleware
 app.add_middleware(
@@ -567,7 +589,7 @@ async def calibrate_temperature(req: TemperatureCalibrateRequest):
         if not req.texts or not req.labels or len(req.texts) != len(req.labels):
             raise HTTPException(status_code=400, detail="texts and labels must be non-empty and have same length")
         new_t = model_service.calibrate_temperature(req.texts, req.labels, max_steps=req.max_steps, lr=req.lr)
-        return {"temperature": new_t}
+        return {"temperature": new_t, "message": "Temperature calibration completed"}
     except HTTPException:
         raise
     except Exception as e:
@@ -586,6 +608,8 @@ async def explain_prediction(request: ExplanationRequest):
             "tokens": exp["tokens"],
             "shap_values": exp["shap_values"],
             "base_value": exp["base_value"],
+            "prediction": exp.get("prediction", {}),
+            "message": exp.get("message", "")
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Explanation error: {str(e)}")
@@ -620,46 +644,44 @@ async def predict_from_url(request: PredictUrlRequest):
 
 @app.post("/predict/explain")
 async def predict_with_explanation(request: PredictExplainRequest):
-    """Return prediction and SHAP explanation together for a single text"""
+    """Return prediction and explanation together for a single text"""
     try:
         pred = model_service.classify_text(request.text)
+        
         if request.explanation_confidence:
             ec = model_service.explanation_confidence(request.text, top_k=max(1, min(request.top_tokens, 10)))
             exp_preview = {"explanation_confidence": ec}
         elif request.use_attention:
             exp = model_service.explain_text_attention(request.text)
-            if not isinstance(exp, dict):
-                exp = {"tokens": [], "weights": []}
-            # return top tokens by weight
-            tokens = exp.get("tokens", []) if isinstance(exp, dict) else []
-            weights = exp.get("weights", []) if isinstance(exp, dict) else []
-            # pair and sort
-            pairs = list(zip(tokens, weights))
-            pairs_sorted = sorted(pairs, key=lambda x: x[1], reverse=True)[: max(1, request.top_tokens)]
             exp_preview = {
-                "attention_tokens": [p[0] for p in pairs_sorted],
-                "attention_weights": [float(p[1]) for p in pairs_sorted],
+                "attention_tokens": exp.get("tokens", [])[:max(1, request.top_tokens)],
+                "attention_weights": exp.get("weights", [])[:max(1, request.top_tokens)],
+                "message": exp.get("message", "")
             }
         elif request.use_lime:
             exp = model_service.explain_text_lime(request.text, num_features=max(1, request.top_tokens))
-            if not isinstance(exp, dict):
-                exp = {"features": [], "weights": []}
-            exp_preview = {"features": exp.get("features", [])[: max(1, request.top_tokens)], "weights": exp.get("weights", [])[: max(1, request.top_tokens)]}
+            exp_preview = {
+                "features": exp.get("features", [])[:max(1, request.top_tokens)], 
+                "weights": exp.get("weights", [])[:max(1, request.top_tokens)],
+                "message": exp.get("message", "")
+            }
         else:
             exp = model_service.explain_text(request.text, max_evals=request.max_evals)
-            # Optionally truncate tokens for response brevity
-            top_n = max(1, request.top_tokens)
             exp_preview = {
-                "tokens": exp.get("tokens", [])[:top_n],
-                "shap_values": exp.get("shap_values", [])[:top_n],
+                "tokens": exp.get("tokens", [])[:max(1, request.top_tokens)],
+                "shap_values": exp.get("shap_values", [])[:max(1, request.top_tokens)],
                 "base_value": exp.get("base_value"),
+                "message": exp.get("message", "")
             }
+        
         return {
             "prediction": "fake" if pred["prediction"] == 1 else "real",
             "confidence": float(pred["confidence"]),
             "probabilities": pred.get("probabilities", {}),
             "explanation": exp_preview,
             "processed_at": datetime.now(),
+            "model_used": pred.get("model_used", "unknown"),
+            "expected_performance": pred.get("expected_performance", {})
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Predict+Explain error: {str(e)}")
@@ -765,10 +787,14 @@ class CounterfactualRequest(BaseModel):
 
 @app.post("/predict/counterfactual")
 async def generate_counterfactuals(req: CounterfactualRequest):
-    """Generate simple counterfactuals by removing top SHAP tokens and re-predicting."""
+    """Generate simple counterfactuals by removing words and re-predicting."""
     try:
         variants = model_service.generate_counterfactuals(req.text, max_candidates=max(1, req.max_candidates))
-        return {"base_text": req.text, "counterfactuals": variants}
+        return {
+            "base_text": req.text, 
+            "counterfactuals": variants,
+            "message": "Counterfactuals generated by word removal method"
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Counterfactual generation error: {str(e)}")
 
@@ -847,19 +873,27 @@ async def get_analytics_summary():
     except Exception:
         pass
 
+    # Add model information
+    try:
+        model_info = model_service.get_model_info()
+        payload["model_info"] = model_info
+    except Exception:
+        payload["model_info"] = {"error": "Could not get model information"}
+
     # Attach latest evaluation report summary, if any
     try:
         from app.cache_store import list_reports_json, get_report_json
-        items = list_reports_json(limit=1)
-        latest = None
-        for it in items:
-            # find most recent evaluation report
-            if it.get("report_type") == "evaluation":
-                latest = it
-                break
-        if latest:
+        items = list_reports_json(limit=5)  # Get more reports for selection
+        evaluation_reports = [it for it in items if it.get("report_type") == "evaluation"]
+        
+        payload["available_reports"] = evaluation_reports
+        
+        # Still provide latest for backward compatibility
+        if evaluation_reports:
+            latest = evaluation_reports[0]  # Most recent
             rep = get_report_json(int(latest.get("id")))
             payload["last_evaluation"] = {
+                "id": latest.get("id"),
                 "dataset": rep.get("dataset"),
                 "created_at": rep.get("created_at"),
                 "metrics": {
@@ -869,11 +903,44 @@ async def get_analytics_summary():
                     "f1": rep.get("payload", {}).get("f1"),
                 },
                 "size": rep.get("payload", {}).get("total_evaluated"),
+                "model_info": rep.get("payload", {}).get("model_info", {}),
             }
     except Exception:
-        pass
+        payload["available_reports"] = []
 
     return payload
+
+# Add endpoint to get specific evaluation report for dashboard
+@app.get("/analytics/report/{report_id}")
+async def get_evaluation_report(report_id: int):
+    """Get specific evaluation report for dashboard"""
+    try:
+        from app.cache_store import get_report_json
+        report = get_report_json(report_id)
+        if not report:
+            raise HTTPException(status_code=404, detail="Report not found")
+        
+        if report.get("report_type") != "evaluation":
+            raise HTTPException(status_code=400, detail="Report is not an evaluation report")
+            
+        return {
+            "id": report.get("id"),
+            "dataset": report.get("dataset"),
+            "created_at": report.get("created_at"),
+            "metrics": {
+                "accuracy": report.get("payload", {}).get("accuracy"),
+                "precision": report.get("payload", {}).get("precision"),
+                "recall": report.get("payload", {}).get("recall"),
+                "f1": report.get("payload", {}).get("f1"),
+            },
+            "size": report.get("payload", {}).get("total_evaluated"),
+            "model_info": report.get("payload", {}).get("model_info", {}),
+            "extra_metrics": report.get("payload", {}).get("extra_metrics", {})
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get evaluation report: {str(e)}")
 
 # Reports browsing endpoints (frontend markdown preview)
 @app.get("/reports")

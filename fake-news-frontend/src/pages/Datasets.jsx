@@ -199,15 +199,17 @@ export default function Datasets() {
                         </td>
                         <td className="px-4 py-4 text-sm">
                           <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
-                            item.label === 'true' ? 'bg-green-100 text-green-800' :
+                            // Handle both string labels (LIAR) and label_text (ISOT)
+                            (item.label_text === 'real' || item.label === 'true') ? 'bg-green-100 text-green-800' :
                             item.label === 'mostly-true' ? 'bg-blue-100 text-blue-800' :
                             item.label === 'half-true' ? 'bg-yellow-100 text-yellow-800' :
                             item.label === 'barely-true' ? 'bg-orange-100 text-orange-800' :
-                            item.label === 'false' ? 'bg-red-100 text-red-800' :
+                            (item.label_text === 'fake' || item.label === 'false') ? 'bg-red-100 text-red-800' :
                             item.label === 'pants-on-fire' ? 'bg-red-200 text-red-900' :
                             'bg-gray-100 text-gray-800'
                           }`}>
-                            {item.label.replace('-', ' ')}
+                            {/* Use label_text if available (ISOT), otherwise use label with replace (LIAR) */}
+                            {item.label_text || (typeof item.label === 'string' ? item.label.replace('-', ' ') : String(item.label))}
                           </span>
                         </td>
                         <td className="px-4 py-4 text-sm text-gray-900">

@@ -3,6 +3,10 @@ from typing import Dict, List, Any, Optional
 import torch
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 import numpy as np
+
+# Set matplotlib backend before importing shap to avoid GUI issues
+import matplotlib
+matplotlib.use('Agg')
 import shap
 
 from app.config import settings
@@ -45,6 +49,9 @@ class ModelService:
                 "confidence": 0.5,
                 "probabilities": {"real": 0.5, "fake": 0.5},
             }
+        
+        # Truncate text to prevent token length issues
+        text = self._truncate_text(text, max_tokens=400)
 
         try:
             inputs = self.tokenizer(
@@ -87,6 +94,19 @@ class ModelService:
             },
             "uncertainty": {"predictive_entropy": entropy, "margin": margin},
         }
+    
+    def _truncate_text(self, text: str, max_tokens: int = 400) -> str:
+        """Truncate text to prevent token length issues"""
+        if not text:
+            return ""
+        
+        # Simple word-based truncation
+        words = text.split()
+        if len(words) > max_tokens:
+            words = words[:max_tokens]
+            text = ' '.join(words)
+        
+        return text
 
     def classify_batch(self, texts: List[str]) -> List[Dict[str, Any]]:
         results: List[Dict[str, Any]] = []
@@ -95,6 +115,9 @@ class ModelService:
 
         # Normalize any incoming structure to a clean list of strings
         texts_norm = self._to_list_of_strings(texts)
+        
+        # Truncate texts to prevent token length issues
+        texts_norm = [self._truncate_text(text, max_tokens=400) for text in texts_norm]
 
         try:
             encodings = self.tokenizer(

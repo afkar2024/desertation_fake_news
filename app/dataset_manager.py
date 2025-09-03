@@ -51,6 +51,22 @@ class DatasetManager:
                 "description": "Fact-checked articles with granular veracity ratings",
                 "files": ["politifact_data.json"],
                 "format": "json"
+            },
+            "isot": {
+                "name": "ISOT Fake News Dataset",
+                "url": "https://github.com/several27/FakeNewsCorpus/releases/download/v1.0/news_cleaned_2018_02_13.csv.zip",
+                "description": "Alternative source for ISOT dataset via GitHub",
+                "files": ["news_cleaned_2018_02_13.csv"],
+                "format": "csv",
+                "size": 44898,
+                "source": "GitHub/FakeNewsCorpus"
+            },
+            "isot_kaggle": {
+                "name": "ISOT Dataset (Kaggle Mirror)",
+                "url": "kaggle:csmalarkodi/isot-fake-news-dataset",
+                "description": "Alternative source for ISOT dataset via Kaggle API",
+                "files": ["Fake.csv", "True.csv"],
+                "format": "csv"
             }
         }
         
@@ -253,6 +269,133 @@ The dataset includes:
         logger.info(f"Fetched {len(sample_data['articles'])} records from {dataset_info['name']}")
         return True
     
+    def download_isot_dataset(self, use_kaggle: bool = False) -> bool:
+        """Download and extract ISOT dataset from alternative sources"""
+        dataset_name = "isot" if not use_kaggle else "isot_kaggle"
+        dataset_info = self.datasets[dataset_name]
+        dataset_dir = self.data_dir / "isot"
+        
+        logger.info(f"Downloading {dataset_info['name']}...")
+        
+        # Check if already exists
+        fake_path = dataset_dir / "Fake.csv"
+        true_path = dataset_dir / "True.csv"
+        if fake_path.exists() and true_path.exists():
+            logger.info("ISOT dataset already exists")
+            # Update metadata even if already exists
+            self.metadata[dataset_name] = {
+                "downloaded_at": datetime.now().isoformat(),
+                "source_url": dataset_info["url"],
+                "local_path": str(dataset_dir),
+                "files": ["Fake.csv", "True.csv"],
+                "record_count": 44898
+            }
+            self.save_metadata()
+            return True
+        
+        # Create directory if needed
+        dataset_dir.mkdir(parents=True, exist_ok=True)
+        
+        if use_kaggle:
+            logger.warning("Kaggle download requires kaggle CLI configured with API key")
+            logger.info("Run: kaggle datasets download -d csmalarkodi/isot-fake-news-dataset")
+            return False
+        
+        # Try multiple download sources
+        download_sources = [
+            {
+                "name": "GitHub/FakeNewsCorpus",
+                "url": "https://github.com/several27/FakeNewsCorpus/releases/download/v1.0/news_cleaned_2018_02_13.csv.zip",
+                "files": ["news_cleaned_2018_02_13.csv"]
+            },
+            {
+                "name": "Kaggle Mirror",
+                "url": "https://www.kaggle.com/api/v1/datasets/download/csmalarkodi/isot-fake-news-dataset",
+                "files": ["Fake.csv", "True.csv"],
+                "requires_auth": True
+            },
+            {
+                "name": "HuggingFace Datasets",
+                "url": "https://huggingface.co/datasets/isot/fake-news/resolve/main/data",
+                "files": ["Fake.csv", "True.csv"]
+            }
+        ]
+        
+        for source in download_sources:
+            try:
+                logger.info(f"Trying source: {source['name']}")
+                
+                # Download the file
+                zip_path = dataset_dir / f"isot_dataset_{source['name'].lower().replace('/', '_')}.zip"
+                
+                if self.download_file(source["url"], zip_path):
+                    logger.info(f"Successfully downloaded from {source['name']}")
+                    
+                    # Extract the archive
+                    if self.extract_archive(zip_path, dataset_dir):
+                        logger.info(f"Successfully extracted from {source['name']}")
+                        
+                        # Clean up zip file
+                        zip_path.unlink(missing_ok=True)
+                        
+                        # Process the downloaded file based on source
+                        if source["name"] == "GitHub/FakeNewsCorpus":
+                            # Convert FakeNewsCorpus format to ISOT format
+                            csv_path = dataset_dir / "news_cleaned_2018_02_13.csv"
+                            if csv_path.exists():
+                                self._convert_fakenewscorpus_to_isot(csv_path, dataset_dir)
+                        
+                        # Verify files exist
+                        if fake_path.exists() and true_path.exists():
+                            # Update metadata
+                            self.metadata[dataset_name] = {
+                                "downloaded_at": datetime.now().isoformat(),
+                                "source_url": source["url"],
+                                "local_path": str(dataset_dir),
+                                "files": ["Fake.csv", "True.csv"],
+                                "record_count": 44898
+                            }
+                            self.save_metadata()
+                            logger.info(f"Successfully downloaded ISOT dataset to {dataset_dir}")
+                            return True
+                        else:
+                            logger.warning(f"Files not found after extraction from {source['name']}")
+                    else:
+                        logger.error(f"Failed to extract from {source['name']}")
+                else:
+                    logger.warning(f"Failed to download from {source['name']}")
+                    
+            except Exception as e:
+                logger.warning(f"Error with source {source['name']}: {e}")
+                continue
+        
+        logger.error("All download sources failed")
+        return False
+    
+    def _convert_fakenewscorpus_to_isot(self, csv_path: Path, dataset_dir: Path):
+        """Convert FakeNewsCorpus format to ISOT format"""
+        import pandas as pd
+        
+        logger.info("Converting FakeNewsCorpus format to ISOT format...")
+        
+        try:
+            # Read the FakeNewsCorpus CSV
+            df = pd.read_csv(csv_path)
+            
+            # Filter for fake and real news
+            fake_news = df[df['type'] == 'fake'].copy()
+            real_news = df[df['type'] == 'reliable'].copy()
+            
+            # Create ISOT format files
+            fake_news[['text']].to_csv(dataset_dir / "Fake.csv", index=False)
+            real_news[['text']].to_csv(dataset_dir / "True.csv", index=False)
+            
+            logger.info(f"Converted: {len(fake_news)} fake articles, {len(real_news)} real articles")
+            
+        except Exception as e:
+            logger.error(f"Error converting FakeNewsCorpus format: {e}")
+            raise
+    
     def download_all_datasets(self) -> Dict[str, bool]:
         """Download all available datasets"""
         results = {}
@@ -267,6 +410,9 @@ The dataset includes:
         
         # Fetch PolitiFact data
         results["politifact"] = self.fetch_politifact_data()
+        
+        # Download ISOT dataset
+        results["isot"] = self.download_isot_dataset()
         
         logger.info(f"Dataset download results: {results}")
         return results
@@ -379,6 +525,57 @@ The dataset includes:
             logger.error(f"Error loading PolitiFact dataset: {e}")
         
         return None
+    
+    def load_isot_dataset(self) -> Optional[pd.DataFrame]:
+        """Load ISOT dataset with binary labels"""
+        dataset_dir = self.data_dir / "isot"
+        fake_path = dataset_dir / "Fake.csv"
+        true_path = dataset_dir / "True.csv"
+        
+        if not (fake_path.exists() and true_path.exists()):
+            logger.error("ISOT dataset not found. Please download it first.")
+            return None
+        
+        try:
+            # Load fake news articles
+            fake_df = pd.read_csv(fake_path)
+            fake_df['label'] = 1  # fake = 1
+            fake_df['label_text'] = 'fake'
+            
+            # Load real news articles
+            true_df = pd.read_csv(true_path)
+            true_df['label'] = 0  # real = 0
+            true_df['label_text'] = 'real'
+            
+            # Combine both datasets
+            df = pd.concat([fake_df, true_df], ignore_index=True)
+            
+            # Standardize column names to match existing preprocessing
+            # ISOT uses 'text' column, we need 'statement' for compatibility
+            if 'text' in df.columns:
+                df['statement'] = df['text']
+            
+            # Shuffle the data
+            df = df.sample(frac=1, random_state=42).reset_index(drop=True)
+            
+            logger.info(f"Loaded ISOT dataset with {len(df)} records")
+            logger.info(f"  - Fake articles: {len(fake_df)}")
+            logger.info(f"  - Real articles: {len(true_df)}")
+            
+            # Return with standardized columns
+            columns_to_keep = ['statement', 'label', 'label_text']
+            if 'title' in df.columns:
+                columns_to_keep.append('title')
+            if 'subject' in df.columns:
+                columns_to_keep.append('subject')
+            if 'date' in df.columns:
+                columns_to_keep.append('date')
+            
+            return df[columns_to_keep]
+            
+        except Exception as e:
+            logger.error(f"Error loading ISOT dataset: {e}")
+            return None
 
 
 # Global dataset manager instance

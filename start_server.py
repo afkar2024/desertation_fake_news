@@ -66,14 +66,19 @@ def main():
     try:
         print(f"🔧 Starting server with log_level: {log_level}")
         
-        # Start the server
+        # Start the server with increased limits for large dataset processing
         uvicorn.run(
             "app.main:app",
             host=host,
             port=port,
             log_level=log_level,
             reload=reload,
-            reload_dirs=["app"] if reload else None
+            reload_dirs=["app"] if reload else None,
+            timeout_keep_alive=300,  # 5 minutes keep-alive
+            timeout_graceful_shutdown=60,  # 1 minute graceful shutdown
+            limit_max_requests=10000,  # Increase max requests
+            limit_concurrency=1000,  # Increase concurrency limit
+            backlog=2048  # Increase backlog
         )
     except KeyboardInterrupt:
         print("\n👋 Server stopped gracefully")

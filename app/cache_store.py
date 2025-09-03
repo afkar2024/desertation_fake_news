@@ -15,7 +15,10 @@ import hashlib
 import uuid
 
 
-DB_PATH = Path("processed_data") / "cache.db"
+import os
+# Use absolute path to avoid working directory issues
+_BASE_DIR = Path(__file__).parent.parent  # Go up from app/ to project root
+DB_PATH = _BASE_DIR / "processed_data" / "cache.db"
 
 
 def _get_conn() -> sqlite3.Connection:
@@ -68,6 +71,25 @@ def _get_conn() -> sqlite3.Connection:
     return conn
 
 
+class DatabaseConnection:
+    def __init__(self):
+        self.conn = None
+    
+    def __enter__(self):
+        self.conn = _get_conn()
+        return self.conn
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if self.conn:
+            if exc_type is None:
+                # No exception occurred, commit the transaction
+                self.conn.commit()
+            else:
+                # Exception occurred, rollback the transaction
+                self.conn.rollback()
+            self.conn.close()
+
+
 def compute_params_hash(params: Dict[str, Any]) -> str:
     try:
         normalized = json.dumps(params, sort_keys=True, separators=(",", ":"))
@@ -99,7 +121,7 @@ def put_result(
         datetime.utcnow().isoformat(),
         json.dumps(payload, default=str),
     )
-    with _get_conn() as conn:
+    with DatabaseConnection() as conn:
         conn.execute(
             """
             INSERT INTO results_cache
@@ -127,7 +149,7 @@ def get_result(
         query += " AND trace_id=?"
         params.append(trace_id)
     query += " ORDER BY id DESC LIMIT 1"
-    with _get_conn() as conn:
+    with DatabaseConnection() as conn:
         cur = conn.execute(query, params)
         row = cur.fetchone()
         if not row:
@@ -150,7 +172,7 @@ def add_report(*, dataset: str, report_type: str, payload: Dict[str, Any]) -> in
         datetime.utcnow().isoformat(),
         json.dumps(payload, default=str),
     )
-    with _get_conn() as conn:
+    with DatabaseConnection() as conn:
         cur = conn.execute(
             """
             INSERT INTO reports (dataset, report_type, created_at, payload)
@@ -162,7 +184,7 @@ def add_report(*, dataset: str, report_type: str, payload: Dict[str, Any]) -> in
 
 
 def list_reports_json(*, limit: int = 50) -> list[dict[str, Any]]:
-    with _get_conn() as conn:
+    with DatabaseConnection() as conn:
         cur = conn.execute(
             "SELECT id, dataset, report_type, created_at FROM reports ORDER BY id DESC LIMIT ?",
             (int(limit),),
@@ -179,7 +201,7 @@ def list_reports_json(*, limit: int = 50) -> list[dict[str, Any]]:
 
 
 def get_report_json(report_id: int) -> Optional[Dict[str, Any]]:
-    with _get_conn() as conn:
+    with DatabaseConnection() as conn:
         cur = conn.execute("SELECT id, dataset, report_type, created_at, payload FROM reports WHERE id=?", (int(report_id),))
         row = cur.fetchone()
         if not row:

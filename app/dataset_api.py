@@ -13,10 +13,13 @@ import asyncio
 from datetime import datetime
 import tempfile
 import os
+import logging
+
+logger = logging.getLogger(__name__)
 
 from .dataset_manager import dataset_manager
 from .preprocessing import preprocessor
-from .model_service import model_service
+from .model_service_instance import model_service
 from .reports import write_metrics_report, write_comparative_metrics_report
 from .cache_store import (
     compute_params_hash,
@@ -62,6 +65,7 @@ class FullPipelineRequest(BaseModel):
     download_if_missing: bool = True
     return_markdown: bool = False
     save_report: bool = False
+    limit: Optional[int] = None  # Limit number of records to process
 
 def generate_markdown_report_api(results: Optional[Dict[str, bool]] = None, 
                                original_df: Optional[pd.DataFrame] = None, 
@@ -385,7 +389,7 @@ class CrossDomainEvaluateRequest(BaseModel):
     label_column: str = "label"
     limit: int = 1000
     compare_baseline: bool = True
-    datasets: List[str] = ["liar", "politifact"]
+    datasets: List[str] = ["liar", "politifact", "isot"]
     save_report: bool = False
 
 
@@ -418,6 +422,9 @@ async def evaluate_cross_domain(request: CrossDomainEvaluateRequest, trace_id: O
             elif name == "politifact":
                 df = dataset_manager.load_politifact_dataset()
                 default_map = None
+            elif name == "isot":
+                df = dataset_manager.load_isot_dataset()
+                default_map = None  # ISOT already has binary labels
             else:
                 continue
 
@@ -526,6 +533,8 @@ async def get_active_learning_samples(dataset_name: str, request: ActiveSampling
         df = dataset_manager.load_liar_dataset()
     elif dataset_name == "politifact":
         df = dataset_manager.load_politifact_dataset()
+    elif dataset_name == "isot":
+        df = dataset_manager.load_isot_dataset()
     else:
         raise HTTPException(status_code=400, detail=f"Active sampling not implemented for {dataset_name}")
 
@@ -567,7 +576,7 @@ async def get_active_learning_samples(dataset_name: str, request: ActiveSampling
 
 @router.get("/", response_model=List[DatasetInfo])
 async def list_datasets():
-    """List all available datasets with their metadata"""
+    """List all available datasets with their metadata and status"""
     datasets = []
     metadata = dataset_manager.list_datasets()
     
@@ -606,6 +615,8 @@ async def download_single_dataset(dataset_name: str, background_tasks: Backgroun
         background_tasks.add_task(dataset_manager.download_fakenewsnet_dataset)
     elif dataset_name == "politifact":
         background_tasks.add_task(dataset_manager.fetch_politifact_data)
+    elif dataset_name == "isot":
+        background_tasks.add_task(dataset_manager.download_isot_dataset)
     else:
         raise HTTPException(status_code=400, detail="Download not implemented for this dataset")
     
@@ -623,6 +634,63 @@ async def get_dataset_info(dataset_name: str):
     
     return info
 
+@router.get("/status")
+async def get_datasets_status():
+    """Get the status of all datasets (available/not available)"""
+    status = {}
+    
+    # Check LIAR dataset
+    try:
+        liar_df = dataset_manager.load_liar_dataset()
+        status["liar"] = {
+            "available": liar_df is not None,
+            "record_count": len(liar_df) if liar_df is not None else 0,
+            "status": "downloaded" if liar_df is not None else "not_downloaded"
+        }
+    except Exception as e:
+        status["liar"] = {
+            "available": False,
+            "record_count": 0,
+            "status": "error",
+            "error": str(e)
+        }
+    
+    # Check PolitiFact dataset
+    try:
+        politifact_df = dataset_manager.load_politifact_dataset()
+        status["politifact"] = {
+            "available": politifact_df is not None,
+            "record_count": len(politifact_df) if politifact_df is not None else 0,
+            "status": "downloaded" if politifact_df is not None else "not_downloaded"
+        }
+    except Exception as e:
+        status["politifact"] = {
+            "available": False,
+            "record_count": 0,
+            "status": "error",
+            "error": str(e)
+        }
+    
+    # Check ISOT dataset
+    try:
+        isot_df = dataset_manager.load_isot_dataset()
+        status["isot"] = {
+            "available": isot_df is not None,
+            "record_count": len(isot_df) if isot_df is not None else 0,
+            "status": "downloaded" if isot_df is not None else "not_downloaded",
+            "note": "Download source no longer accessible" if isot_df is None else None
+        }
+    except Exception as e:
+        status["isot"] = {
+            "available": False,
+            "record_count": 0,
+            "status": "error",
+            "error": str(e),
+            "note": "Download source no longer accessible"
+        }
+    
+    return status
+
 @router.get("/{dataset_name}/sample")
 async def get_dataset_sample(dataset_name: str, size: int = 10):
     """Get a sample of records from a dataset"""
@@ -631,6 +699,10 @@ async def get_dataset_sample(dataset_name: str, size: int = 10):
             df = dataset_manager.load_liar_dataset()
         elif dataset_name == "politifact":
             df = dataset_manager.load_politifact_dataset()
+        elif dataset_name == "isot":
+            df = dataset_manager.load_isot_dataset()
+        elif dataset_name == "isot":
+            df = dataset_manager.load_isot_dataset()
         elif dataset_name == "fakenewsnet":
             # Not implemented in demo scope: return an empty sample gracefully
             return {
@@ -700,6 +772,8 @@ async def preprocess_dataset(
             df = dataset_manager.load_liar_dataset()
         elif dataset_name == "politifact":
             df = dataset_manager.load_politifact_dataset()
+        elif dataset_name == "isot":
+            df = dataset_manager.load_isot_dataset()
         else:
             raise HTTPException(status_code=400, detail="Dataset loading not implemented")
         
@@ -773,15 +847,24 @@ async def _preprocess_dataset_task(
 ):
     """Background task for dataset preprocessing"""
     try:
+        # Use optimized preprocessing based on dataset size
+        if len(df) > 10000:
+            print(f"🚀 [BACKGROUND] Using ULTRA-FAST preprocessing for large dataset ({len(df):,} records)")
+            from app.preprocessing import preprocessor_ultra_fast
+            current_preprocessor = preprocessor_ultra_fast
+        else:
+            print(f"📊 [BACKGROUND] Using standard fast preprocessing for dataset ({len(df):,} records)")
+            current_preprocessor = preprocessor
+        
         # Preprocess the dataset
-        processed_df = preprocessor.preprocess_dataframe(df, text_column, label_column)
+        processed_df = current_preprocessor.preprocess_dataframe(df, text_column, label_column)
         
         # Balance the dataset if requested
         if balance_strategy:
-            processed_df = preprocessor.balance_dataset(processed_df, 'label_encoded', balance_strategy)
+            processed_df = current_preprocessor.balance_dataset(processed_df, 'label_encoded', balance_strategy)
         
         # Save the processed data
-        preprocessor.save_preprocessed_data(processed_df, save_path)
+        current_preprocessor.save_preprocessed_data(processed_df, save_path)
         
         print(f"Preprocessing completed. Saved to {save_path}")
         
@@ -817,6 +900,8 @@ async def full_pipeline_processing(
                     success = dataset_manager.download_liar_dataset()
                 elif dataset_name == "politifact":
                     success = dataset_manager.fetch_politifact_data()
+                elif dataset_name == "isot":
+                    success = dataset_manager.download_isot_dataset()
                 elif dataset_name == "fakenewsnet":
                     success = dataset_manager.download_fakenewsnet_dataset()
                 else:
@@ -835,11 +920,26 @@ async def full_pipeline_processing(
             df = dataset_manager.load_liar_dataset()
         elif dataset_name == "politifact":
             df = dataset_manager.load_politifact_dataset()
+        elif dataset_name == "isot":
+            df = dataset_manager.load_isot_dataset()
+            if df is None:
+                # Provide helpful error message for ISOT dataset
+                raise HTTPException(
+                    status_code=404, 
+                    detail=f"ISOT dataset is not available. The original download source is no longer accessible. "
+                          f"Please use one of the available datasets: 'liar' or 'politifact'. "
+                          f"Alternatively, you can manually download the ISOT dataset from Kaggle: "
+                          f"kaggle datasets download -d csmalarkodi/isot-fake-news-dataset"
+                )
         else:
             raise HTTPException(status_code=400, detail=f"Dataset loading not implemented for {dataset_name}")
         
         if df is None:
             raise HTTPException(status_code=404, detail=f"Could not load {dataset_name} dataset")
+        
+        # Apply limit if specified
+        if request.limit and request.limit > 0:
+            df = df.head(request.limit)
         
         # Step 3: Check required columns
         if request.text_column not in df.columns:
@@ -855,9 +955,32 @@ async def full_pipeline_processing(
         if cached:
             return cached
 
-        # Step 4: Preprocess the dataset
+        # Step 4: Preprocess the dataset with parallel processing
         original_df = df.copy()
-        processed_df = preprocessor.preprocess_dataframe(df, request.text_column, request.label_column)
+        
+        # For very large datasets (>5000 records), recommend background processing
+        if len(df) > 5000:
+            logger.warning(f"Large dataset detected ({len(df)} records). Consider using background processing endpoint for better performance.")
+        
+        # Use optimized preprocessing based on dataset size
+        def progress_callback(message: str):
+            logger.info(f"[PIPELINE] {message}")
+        
+        # For large datasets (>10K records), use ultra-fast processing to avoid timeouts
+        if len(df) > 10000:
+            logger.info(f"🚀 Using ULTRA-FAST preprocessing for large dataset ({len(df):,} records)")
+            from app.preprocessing import preprocessor_ultra_fast
+            current_preprocessor = preprocessor_ultra_fast
+        else:
+            logger.info(f"📊 Using standard fast preprocessing for dataset ({len(df):,} records)")
+            current_preprocessor = preprocessor
+        
+        processed_df = current_preprocessor.preprocess_dataframe(
+            df, 
+            request.text_column, 
+            request.label_column, 
+            progress_callback=progress_callback
+        )
         
         # Step 5: Apply balancing if requested
         balanced_df = None
@@ -930,6 +1053,9 @@ async def evaluate_model_on_dataset(dataset_name: str, request: EvaluateModelReq
         elif dataset_name == "politifact":
             df = dataset_manager.load_politifact_dataset()
             default_map = None
+        elif dataset_name == "isot":
+            df = dataset_manager.load_isot_dataset()
+            default_map = None  # ISOT already has binary labels
         else:
             raise HTTPException(status_code=400, detail=f"Evaluation not implemented for {dataset_name}")
 
@@ -973,10 +1099,62 @@ async def evaluate_model_on_dataset(dataset_name: str, request: EvaluateModelReq
             except Exception:
                 pass
 
-        # Generate predictions (model)
+        # Generate predictions (model) with batching for large datasets
         texts = df[request.text_column].astype(str).tolist()
-        await progress_manager.publish(trace, stage="predict", message="Running model predictions")
-        preds = model_service.classify_batch(texts)
+        await progress_manager.publish(trace, stage="predict", message=f"Running model predictions on {len(texts):,} texts")
+        
+        # Use smaller batches to prevent CPU overload
+        batch_size = min(50, max(10, len(texts) // 50))  # More conservative batch size
+        total_batches = (len(texts) + batch_size - 1) // batch_size
+        
+        await progress_manager.publish(trace, stage="predict", message=f"Processing {total_batches} batches of ~{batch_size} texts each", percent=0.0)
+        
+        all_preds = []
+        import time
+        start_time = time.time()
+        
+        for batch_idx in range(total_batches):
+            start_idx = batch_idx * batch_size
+            end_idx = min(start_idx + batch_size, len(texts))
+            batch_texts = texts[start_idx:end_idx]
+            
+            # Calculate progress and time estimates
+            progress_pct = (batch_idx / total_batches) * 100
+            elapsed_time = time.time() - start_time
+            
+            if batch_idx > 0:
+                avg_time_per_batch = elapsed_time / batch_idx
+                remaining_batches = total_batches - batch_idx
+                estimated_remaining_time = remaining_batches * avg_time_per_batch
+                eta_msg = f"(ETA: {estimated_remaining_time/60:.1f} min)"
+            else:
+                eta_msg = "(calculating ETA...)"
+            
+            await progress_manager.publish(
+                trace, 
+                stage="predict", 
+                message=f"🤖 Batch {batch_idx + 1}/{total_batches}: Processing {len(batch_texts)} texts {eta_msg}",
+                percent=progress_pct
+            )
+            
+            # Process batch
+            batch_start = time.time()
+            batch_preds = model_service.classify_batch(batch_texts)
+            batch_time = time.time() - batch_start
+            all_preds.extend(batch_preds)
+            
+            # Log completion with performance stats
+            completed_pct = ((batch_idx + 1) / total_batches) * 100
+            texts_per_sec = len(batch_texts) / batch_time if batch_time > 0 else 0
+            await progress_manager.publish(
+                trace, 
+                stage="predict", 
+                message=f"✅ Batch {batch_idx + 1}/{total_batches}: Complete! ({len(all_preds):,}/{len(texts):,} total, {texts_per_sec:.1f} texts/sec)",
+                percent=completed_pct
+            )
+        
+        await progress_manager.publish(trace, stage="predict", message=f"✅ All predictions complete: {len(all_preds):,} texts processed", percent=100.0)
+        preds = all_preds
         y_pred = np.array([p["prediction"] for p in preds], dtype=int)
 
         # If labels are available, compute metrics
@@ -988,12 +1166,13 @@ async def evaluate_model_on_dataset(dataset_name: str, request: EvaluateModelReq
         temporal_metrics = None
         attention_metrics = None
         if y_true is not None:
+            await progress_manager.publish(trace, stage="metrics", message="📊 Computing evaluation metrics...", percent=0.0)
             y_true_arr = np.array(y_true.tolist(), dtype=int)
             accuracy = float(accuracy_score(y_true_arr, y_pred))
             precision, recall, f1, _ = precision_recall_fscore_support(
                 y_true_arr, y_pred, average="binary", zero_division=0
             )
-            await progress_manager.publish(trace, stage="metrics", message="Computing metrics")
+            await progress_manager.publish(trace, stage="metrics", message="📊 Basic metrics computed", percent=25.0)
             # Confusion matrix (TN, FP, FN, TP)
             try:
                 tn, fp, fn, tp = confusion_matrix(y_true_arr, y_pred, labels=[0, 1]).ravel()
@@ -1063,15 +1242,41 @@ async def evaluate_model_on_dataset(dataset_name: str, request: EvaluateModelReq
             except Exception:
                 calibration_metrics = None
 
-            # MC Dropout uncertainty (epistemic) if requested
+            # MC Dropout uncertainty (epistemic) if requested - with batching for large datasets
             if request.mc_dropout_samples and request.mc_dropout_samples > 0:
                 try:
-                    await progress_manager.publish(trace, stage="uncertainty", message="Computing MC Dropout uncertainty")
-                    mc = model_service.predict_proba_mc(texts, mc_samples=int(request.mc_dropout_samples))
-                    mi = mc.get("mutual_information", [])
-                    if len(mi) == len(texts):
+                    await progress_manager.publish(trace, stage="uncertainty", message=f"Computing MC Dropout uncertainty with {request.mc_dropout_samples} samples")
+                    
+                    # Use very small batch size for MC dropout due to computational intensity
+                    mc_batch_size = min(20, max(5, len(texts) // 100))
+                    mc_total_batches = (len(texts) + mc_batch_size - 1) // mc_batch_size
+                    
+                    await progress_manager.publish(trace, stage="uncertainty", message=f"MC Dropout: {mc_total_batches} batches of ~{mc_batch_size} texts each")
+                    
+                    all_mi = []
+                    for mc_batch_idx in range(mc_total_batches):
+                        start_idx = mc_batch_idx * mc_batch_size
+                        end_idx = min(start_idx + mc_batch_size, len(texts))
+                        batch_texts = texts[start_idx:end_idx]
+                        
+                        # Log progress for each MC dropout batch
+                        mc_progress_pct = ((mc_batch_idx + 1) / mc_total_batches) * 100
+                        await progress_manager.publish(
+                            trace, 
+                            stage="uncertainty", 
+                            message=f"🎲 MC Batch {mc_batch_idx + 1}/{mc_total_batches}: {len(batch_texts)} texts ({mc_progress_pct:.1f}%)"
+                        )
+                        
+                        # Process MC dropout for batch
+                        mc_batch = model_service.predict_proba_mc(batch_texts, mc_samples=int(request.mc_dropout_samples))
+                        batch_mi = mc_batch.get("mutual_information", [])
+                        all_mi.extend(batch_mi)
+                    
+                    await progress_manager.publish(trace, stage="uncertainty", message=f"✅ MC Dropout complete: {len(all_mi):,} uncertainty values")
+                    
+                    if len(all_mi) == len(texts):
                         # summarize
-                        mi_arr = np.array(mi, dtype=float)
+                        mi_arr = np.array(all_mi, dtype=float)
                         metrics_payload_mi = {
                             "mc_dropout_samples": int(request.mc_dropout_samples),
                             "mutual_information_mean": round(float(mi_arr.mean()), 6),
@@ -1079,7 +1284,8 @@ async def evaluate_model_on_dataset(dataset_name: str, request: EvaluateModelReq
                         }
                     else:
                         metrics_payload_mi = {"mc_dropout_samples": int(request.mc_dropout_samples)}
-                except Exception:
+                except Exception as e:
+                    await progress_manager.publish(trace, stage="uncertainty", message=f"❌ MC Dropout error: {str(e)}")
                     metrics_payload_mi = {"mc_dropout_samples": int(request.mc_dropout_samples), "mc_error": True}
             else:
                 metrics_payload_mi = None
@@ -1210,14 +1416,30 @@ async def evaluate_model_on_dataset(dataset_name: str, request: EvaluateModelReq
                 except Exception:
                     exp_quality_metrics = None
 
-            # Baseline comparison using heuristic score
+            # Baseline comparison using heuristic score - with progress tracking for large datasets
             if request.compare_baseline:
+                await progress_manager.publish(trace, stage="baseline", message="Computing baseline predictions")
                 baseline_pred = []
+                processed_count = 0
+                total_texts = len(texts)
+                
                 for t, row in zip(texts, df.itertuples(index=False)):
                     title = getattr(row, "title", "") if hasattr(row, "title") else ""
                     url = getattr(row, "source_url", "") if hasattr(row, "source_url") else ""
                     fake_prob = calculate_fake_news_score(title, t, url).get("fake_probability", 0.0)
                     baseline_pred.append(1 if fake_prob >= 0.5 else 0)
+                    
+                    processed_count += 1
+                    # Update progress every 1000 texts or at 25%, 50%, 75% completion
+                    if (processed_count % 1000 == 0) or (processed_count / total_texts) in [0.25, 0.5, 0.75, 1.0]:
+                        progress_pct = (processed_count / total_texts) * 100
+                        await progress_manager.publish(
+                            trace, 
+                            stage="baseline", 
+                            message=f"📊 Baseline: {processed_count:,}/{total_texts:,} texts ({progress_pct:.1f}%)"
+                        )
+                
+                await progress_manager.publish(trace, stage="baseline", message=f"✅ Baseline predictions complete: {len(baseline_pred):,} texts")
                 baseline_pred = np.array(baseline_pred, dtype=int)
                 b_acc = float(accuracy_score(y_true_arr, baseline_pred))
                 b_prec, b_rec, b_f1, _ = precision_recall_fscore_support(
@@ -1564,6 +1786,7 @@ async def evaluate_model_on_dataset(dataset_name: str, request: EvaluateModelReq
 
         # Abstention curve using margin (confidence gap)
         if y_true is not None and request.abstention_curve:
+            await progress_manager.publish(trace, stage="metrics", message="📈 Computing abstention curve...", percent=65.0)
             try:
                 margins = np.array([
                     float(item.get("uncertainty", {}).get("margin", 0.0)) for item in preds
@@ -1623,7 +1846,19 @@ async def evaluate_model_on_dataset(dataset_name: str, request: EvaluateModelReq
             "total_evaluated": int(len(df)),
             "metrics": metrics_payload,
         })
-        await progress_manager.publish(trace, stage="done", message="Evaluation complete", percent=100.0)
+        total_time = time.time() - start_time
+        await progress_manager.publish(
+            trace, 
+            stage="done", 
+            message=f"✅ Evaluation complete: {len(texts):,} texts processed in {total_time/60:.1f} minutes", 
+            percent=100.0
+        )
+        # Get model information for the report
+        try:
+            model_info = model_service.get_model_info()
+        except Exception:
+            model_info = {"error": "Could not retrieve model information"}
+
         # Store cache
         cache_payload = {
             "dataset": dataset_name,
@@ -1634,6 +1869,7 @@ async def evaluate_model_on_dataset(dataset_name: str, request: EvaluateModelReq
             "f1": float(f1),
             "report_path": report_path,
             "extra_metrics": metrics_payload,
+            "model_info": model_info,
         }
         trace = cache_put(
             trace_id=trace_id,
@@ -1645,11 +1881,15 @@ async def evaluate_model_on_dataset(dataset_name: str, request: EvaluateModelReq
         )
         # Attach trace_id to payload persisted to reports table
         cache_payload["trace_id"] = trace
-        try:
-            if request.save_report:
-                add_report(dataset=dataset_name, report_type="evaluation", payload=cache_payload)
-        except Exception:
-            pass
+        # Save report to database
+        if request.save_report:
+            try:
+                report_id = add_report(dataset=dataset_name, report_type="evaluation", payload=cache_payload)
+                logger.info(f"✅ Saved evaluation report to database (ID: {report_id})")
+                cache_payload["report_id"] = report_id
+            except Exception as e:
+                logger.error(f"❌ Failed to save report to database: {str(e)}")
+                # Don't fail the entire request if report saving fails
         response.extra_metrics["trace_id"] = trace
         return response
     except HTTPException:
@@ -1706,19 +1946,48 @@ async def _full_pipeline_background_task(dataset_name: str, request: FullPipelin
             df = dataset_manager.load_liar_dataset()
         elif dataset_name == "politifact":
             df = dataset_manager.load_politifact_dataset()
+        elif dataset_name == "isot":
+            df = dataset_manager.load_isot_dataset()
         
         if df is None:
             print(f"Error: Could not load {dataset_name} dataset")
             return
         
-        # Step 3: Preprocess
+        # Apply limit if specified for background processing
+        if request.limit and request.limit > 0:
+            df = df.head(request.limit)
+        
+        # Step 3: Preprocess with parallel processing and detailed logging
         original_df = df.copy()
-        processed_df = preprocessor.preprocess_dataframe(df, request.text_column, request.label_column)
+        logger.info(f"🚀 Starting background preprocessing of {len(df):,} records...")
+        
+        # Use optimized preprocessing based on dataset size
+        if len(df) > 10000:
+            logger.info(f"🚀 [BACKGROUND] Using ULTRA-FAST preprocessing for large dataset ({len(df):,} records)")
+            print(f"🚀 [BACKGROUND] Using ULTRA-FAST preprocessing for large dataset ({len(df):,} records)")
+            from app.preprocessing import preprocessor_ultra_fast
+            current_preprocessor = preprocessor_ultra_fast
+        else:
+            logger.info(f"📊 [BACKGROUND] Using standard fast preprocessing for dataset ({len(df):,} records)")
+            print(f"📊 [BACKGROUND] Using standard fast preprocessing for dataset ({len(df):,} records)")
+            current_preprocessor = preprocessor
+        
+        # Progress callback for detailed logging
+        def progress_callback(message: str):
+            print(f"[BACKGROUND] {message}")
+            logger.info(f"[BACKGROUND] {message}")
+        
+        processed_df = current_preprocessor.preprocess_dataframe(
+            df, 
+            request.text_column, 
+            request.label_column, 
+            progress_callback=progress_callback
+        )
         
         # Step 4: Balance if requested
         balanced_df = None
         if request.balance_strategy:
-            balanced_df = preprocessor.balance_dataset(processed_df, 'label_encoded', request.balance_strategy)
+            balanced_df = current_preprocessor.balance_dataset(processed_df, 'label_encoded', request.balance_strategy)
             final_df = balanced_df
         else:
             final_df = processed_df
@@ -1728,7 +1997,7 @@ async def _full_pipeline_background_task(dataset_name: str, request: FullPipelin
         output_dir.mkdir(parents=True, exist_ok=True)
         
         csv_file = output_dir / f"{dataset_name}_processed.csv"
-        preprocessor.save_preprocessed_data(final_df, str(csv_file))
+        current_preprocessor.save_preprocessed_data(final_df, str(csv_file))
         
         # Step 6: Generate markdown report
         if request.return_markdown:
