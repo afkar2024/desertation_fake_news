@@ -87,7 +87,8 @@ class TextPreprocessor:
                  truncation_method: str = "fast"):
         self.language = language
         self.model_name = model_name
-        self.max_workers = max_workers or min(32, (cpu_count() or 1) + 4)  # Increase worker count
+        # Reduce max_workers to prevent threading deadlocks - more conservative approach
+        self.max_workers = max_workers or min(8, (cpu_count() or 1))  # Reduced from 32 to 8 max workers
         self.truncation_method = truncation_method  # "fast", "chars", or "skip"
         
         # Initialize components
@@ -222,39 +223,65 @@ class TextPreprocessor:
             return self.truncate_text(text, max_tokens)
     
     def _process_text_batch(self, texts: List[str], progress_callback=None, task_name="Processing") -> List[str]:
-        """Process a batch of texts - sequential for ultra-fast mode, parallel for others"""
+        """Process a batch of texts with timeout and fallback to sequential processing"""
         
         # ULTRA-FAST MODE: Use sequential processing to avoid threading deadlocks
         if self.truncation_method == "skip":
             return self._process_text_batch_sequential(texts, progress_callback, task_name)
         
-        # STANDARD MODE: Use parallel processing
+        # For large batches or problematic datasets, use sequential processing to avoid deadlocks
+        if len(texts) > 1000:
+            logger.info(f"⚡ Using sequential text processing for large batch ({len(texts)} texts) to avoid threading issues")
+            return self._process_text_batch_sequential(texts, progress_callback, task_name)
+        
+        # STANDARD MODE: Use parallel processing with timeout and fallback
         results = [None] * len(texts)
         completed = 0
         
-        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            # Submit all tasks
-            future_to_index = {
-                executor.submit(self.preprocess_text, text): i 
-                for i, text in enumerate(texts)
-            }
-            
-            # Process results as they complete
-            for future in as_completed(future_to_index):
-                index = future_to_index[future]
+        try:
+            with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+                # Submit all tasks
+                future_to_index = {
+                    executor.submit(self.preprocess_text, text): i 
+                    for i, text in enumerate(texts)
+                }
+                
+                # Process results as they complete with timeout
+                import concurrent.futures
+                timeout_seconds = 120  # 2 minutes timeout per batch
+                
                 try:
-                    results[index] = future.result()
-                    completed += 1
+                    for future in concurrent.futures.as_completed(future_to_index, timeout=timeout_seconds):
+                        index = future_to_index[future]
+                        try:
+                            results[index] = future.result(timeout=30)  # 30 second timeout per individual task
+                            completed += 1
+                            
+                            # Progress callback
+                            if progress_callback and completed % max(1, len(texts) // 20) == 0:  # Update every 5%
+                                progress = (completed / len(texts)) * 100
+                                progress_callback(f"{task_name}: {completed}/{len(texts)} ({progress:.1f}%)")
+                                
+                        except concurrent.futures.TimeoutError:
+                            logger.warning(f'Text processing task {index} timed out, using empty result')
+                            results[index] = ""
+                            completed += 1
+                        except Exception as exc:
+                            logger.error(f'Text {index} generated an exception: {exc}')
+                            results[index] = ""
+                            completed += 1
+                            
+                except concurrent.futures.TimeoutError:
+                    logger.error(f'Text processing batch timed out after {timeout_seconds}s, falling back to sequential processing')
+                    # Cancel remaining futures
+                    for future in future_to_index:
+                        future.cancel()
+                    # Fallback to sequential processing
+                    return self._process_text_batch_sequential(texts, progress_callback, f"{task_name} (Fallback)")
                     
-                    # Progress callback
-                    if progress_callback and completed % max(1, len(texts) // 20) == 0:  # Update every 5%
-                        progress = (completed / len(texts)) * 100
-                        progress_callback(f"{task_name}: {completed}/{len(texts)} ({progress:.1f}%)")
-                        
-                except Exception as exc:
-                    logger.error(f'Text {index} generated an exception: {exc}')
-                    results[index] = ""
-                    completed += 1
+        except Exception as e:
+            logger.error(f'Parallel text processing failed: {e}, falling back to sequential processing')
+            return self._process_text_batch_sequential(texts, progress_callback, f"{task_name} (Fallback)")
         
         if progress_callback:
             progress_callback(f"{task_name}: {completed}/{len(texts)} (100.0%) - Complete!")
@@ -285,39 +312,65 @@ class TextPreprocessor:
         return results
     
     def _calculate_features_batch(self, texts: List[str], feature_func, progress_callback=None, task_name="Features") -> List[Dict[str, Any]]:
-        """Calculate features for a batch of texts - sequential for ultra-fast mode"""
+        """Calculate features for a batch of texts with timeout and fallback to sequential processing"""
         
         # ULTRA-FAST MODE: Use sequential processing to avoid threading deadlocks
         if self.truncation_method == "skip":
             return self._calculate_features_batch_sequential(texts, feature_func, progress_callback, task_name)
         
-        # STANDARD MODE: Use parallel processing
+        # For large batches or problematic datasets, use sequential processing to avoid deadlocks
+        if len(texts) > 1000:
+            logger.info(f"⚡ Using sequential processing for large batch ({len(texts)} texts) to avoid threading issues")
+            return self._calculate_features_batch_sequential(texts, feature_func, progress_callback, task_name)
+        
+        # STANDARD MODE: Use parallel processing with timeout and fallback
         results = [None] * len(texts)
         completed = 0
         
-        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            # Submit all tasks
-            future_to_index = {
-                executor.submit(feature_func, text): i 
-                for i, text in enumerate(texts)
-            }
-            
-            # Process results as they complete
-            for future in as_completed(future_to_index):
-                index = future_to_index[future]
+        try:
+            with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+                # Submit all tasks
+                future_to_index = {
+                    executor.submit(feature_func, text): i 
+                    for i, text in enumerate(texts)
+                }
+                
+                # Process results as they complete with timeout
+                import concurrent.futures
+                timeout_seconds = 120  # 2 minutes timeout per batch
+                
                 try:
-                    results[index] = future.result()
-                    completed += 1
+                    for future in concurrent.futures.as_completed(future_to_index, timeout=timeout_seconds):
+                        index = future_to_index[future]
+                        try:
+                            results[index] = future.result(timeout=30)  # 30 second timeout per individual task
+                            completed += 1
+                            
+                            # Progress callback
+                            if progress_callback and completed % max(1, len(texts) // 20) == 0:  # Update every 5%
+                                progress = (completed / len(texts)) * 100
+                                progress_callback(f"{task_name}: {completed}/{len(texts)} ({progress:.1f}%)")
+                                
+                        except concurrent.futures.TimeoutError:
+                            logger.warning(f'Task {index} timed out, using default result')
+                            results[index] = {}
+                            completed += 1
+                        except Exception as exc:
+                            logger.error(f'Text {index} generated an exception: {exc}')
+                            results[index] = {}
+                            completed += 1
+                            
+                except concurrent.futures.TimeoutError:
+                    logger.error(f'Batch processing timed out after {timeout_seconds}s, falling back to sequential processing')
+                    # Cancel remaining futures
+                    for future in future_to_index:
+                        future.cancel()
+                    # Fallback to sequential processing
+                    return self._calculate_features_batch_sequential(texts, feature_func, progress_callback, f"{task_name} (Fallback)")
                     
-                    # Progress callback
-                    if progress_callback and completed % max(1, len(texts) // 20) == 0:  # Update every 5%
-                        progress = (completed / len(texts)) * 100
-                        progress_callback(f"{task_name}: {completed}/{len(texts)} ({progress:.1f}%)")
-                        
-                except Exception as exc:
-                    logger.error(f'Text {index} generated an exception: {exc}')
-                    results[index] = {}
-                    completed += 1
+        except Exception as e:
+            logger.error(f'Parallel processing failed: {e}, falling back to sequential processing')
+            return self._calculate_features_batch_sequential(texts, feature_func, progress_callback, f"{task_name} (Fallback)")
         
         if progress_callback:
             progress_callback(f"{task_name}: {completed}/{len(texts)} (100.0%) - Complete!")
@@ -838,38 +891,88 @@ class TextPreprocessor:
                 
                 return results
             
-            # Process in batches with parallel execution
-            with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-                futures = []
-                
-                # Submit batches for processing
-                for i in range(0, len(texts), truncation_batch_size):
-                    batch = texts[i:i+truncation_batch_size]
-                    future = executor.submit(truncate_batch, batch)
-                    futures.append(future)
-                
-                # Collect results and track progress
-                for i, future in enumerate(as_completed(futures)):
+            # Process in batches with parallel execution with timeout and fallback
+            try:
+                import concurrent.futures
+                with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+                    futures = []
+                    
+                    # Submit batches for processing
+                    for i in range(0, len(texts), truncation_batch_size):
+                        batch = texts[i:i+truncation_batch_size]
+                        future = executor.submit(truncate_batch, batch)
+                        futures.append(future)
+                    
+                    # Collect results and track progress with timeout
+                    timeout_seconds = 60  # 1 minute timeout for truncation batches
+                    
                     try:
-                        batch_results = future.result()
-                        truncated_texts.extend(batch_results)
-                        processed_count += len(batch_results)
+                        for i, future in enumerate(concurrent.futures.as_completed(futures, timeout=timeout_seconds)):
+                            try:
+                                batch_results = future.result(timeout=10)  # 10 second timeout per batch
+                                truncated_texts.extend(batch_results)
+                                processed_count += len(batch_results)
+                                
+                                # Progress updates every batch
+                                progress = (processed_count / len(texts)) * 100
+                                remaining = len(texts) - processed_count
+                                elapsed = time.time() - start_step
+                                rate = processed_count / elapsed if elapsed > 0 else 0
+                                eta = remaining / rate if rate > 0 else 0
+                                
+                                log_progress(f"   📝 Truncation: {processed_count:,}/{total_records:,} ({progress:.1f}%) - {rate:.0f} texts/sec - ETA: {eta:.1f}s")
+                                    
+                            except concurrent.futures.TimeoutError:
+                                logger.warning(f'Truncation batch {i} timed out, using fallback results')
+                                # Fallback for timed out batch
+                                batch_size_actual = min(truncation_batch_size, len(texts) - len(truncated_texts))
+                                truncated_texts.extend([""] * batch_size_actual)
+                                processed_count += batch_size_actual
+                            except Exception as exc:
+                                logger.error(f'Batch truncation failed: {exc}')
+                                # Fallback for failed batch
+                                batch_size_actual = min(truncation_batch_size, len(texts) - len(truncated_texts))
+                                truncated_texts.extend([""] * batch_size_actual)
+                                processed_count += batch_size_actual
+                                
+                    except concurrent.futures.TimeoutError:
+                        logger.error(f'Truncation processing timed out after {timeout_seconds}s, falling back to sequential processing')
+                        # Cancel remaining futures
+                        for future in futures:
+                            future.cancel()
+                        # Process remaining texts sequentially
+                        remaining_texts = texts[len(truncated_texts):]
+                        for text in remaining_texts:
+                            if not text:
+                                truncated_texts.append("")
+                                continue
+                            if len(text) < 1600:
+                                truncated_texts.append(text)
+                                continue
+                            tokens = text.split()
+                            if len(tokens) <= 400:
+                                truncated_texts.append(text)
+                            else:
+                                truncated_texts.append(' '.join(tokens[:400]))
+                        processed_count = len(truncated_texts)
                         
-                        # Progress updates every batch
-                        progress = (processed_count / len(texts)) * 100
-                        remaining = len(texts) - processed_count
-                        elapsed = time.time() - start_step
-                        rate = processed_count / elapsed if elapsed > 0 else 0
-                        eta = remaining / rate if rate > 0 else 0
-                        
-                        log_progress(f"   📝 Truncation: {processed_count:,}/{total_records:,} ({progress:.1f}%) - {rate:.0f} texts/sec - ETA: {eta:.1f}s")
-                            
-                    except Exception as exc:
-                        logger.error(f'Batch truncation failed: {exc}')
-                        # Fallback for failed batch
-                        batch_size_actual = min(truncation_batch_size, len(texts) - len(truncated_texts))
-                        truncated_texts.extend([""] * batch_size_actual)
-                        processed_count += batch_size_actual
+            except Exception as e:
+                logger.error(f'Parallel truncation failed: {e}, falling back to sequential processing')
+                # Sequential fallback for entire truncation
+                truncated_texts = []
+                for text in texts:
+                    if not text:
+                        truncated_texts.append("")
+                        continue
+                    if len(text) < 1600:
+                        truncated_texts.append(text)
+                        continue
+                    tokens = text.split()
+                    if len(tokens) <= 400:
+                        truncated_texts.append(text)
+                    else:
+                        truncated_texts.append(' '.join(tokens[:400]))
+                processed_count = len(truncated_texts)
             
             # Ensure we have the right number of results
             if len(truncated_texts) != len(texts):
@@ -1126,11 +1229,16 @@ preprocessor = TextPreprocessor(truncation_method="fast")  # Default: fast trunc
 preprocessor_ultra_fast = TextPreprocessor(truncation_method="skip")  # Skip truncation for max speed
 preprocessor_char_based = TextPreprocessor(truncation_method="chars")  # Character-based truncation
 
+# Ultra-safe preprocessor for extremely problematic datasets - forces minimal workers
+preprocessor_ultra_safe = TextPreprocessor(truncation_method="skip", max_workers=1)  # Single worker, no truncation
+
 # For backwards compatibility
 def get_preprocessor(speed_mode: str = "fast"):
     """Get preprocessor optimized for different speed requirements"""
     if speed_mode == "ultra_fast":
         return preprocessor_ultra_fast
+    elif speed_mode == "ultra_safe":
+        return preprocessor_ultra_safe
     elif speed_mode == "chars":
         return preprocessor_char_based
     else:

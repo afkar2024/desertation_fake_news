@@ -848,7 +848,8 @@ async def _preprocess_dataset_task(
     """Background task for dataset preprocessing"""
     try:
         # Use optimized preprocessing based on dataset size
-        if len(df) > 10000:
+        # Note: dataset_name not available in this function, so use size-based logic only
+        if len(df) > 5000:
             print(f"🚀 [BACKGROUND] Using ULTRA-FAST preprocessing for large dataset ({len(df):,} records)")
             from app.preprocessing import preprocessor_ultra_fast
             current_preprocessor = preprocessor_ultra_fast
@@ -966,9 +967,15 @@ async def full_pipeline_processing(
         def progress_callback(message: str):
             logger.info(f"[PIPELINE] {message}")
         
-        # For large datasets (>10K records), use ultra-fast processing to avoid timeouts
-        if len(df) > 10000:
-            logger.info(f"🚀 Using ULTRA-FAST preprocessing for large dataset ({len(df):,} records)")
+        # For large datasets or problematic datasets like ISOT, use ultra-fast processing to avoid threading deadlocks
+        if dataset_name.lower() == "isot":
+            logger.info(f"🛡️  Using ULTRA-SAFE preprocessing for ISOT dataset ({len(df):,} records)")
+            logger.info("   This uses single-worker sequential processing to completely avoid threading deadlocks")
+            from app.preprocessing import preprocessor_ultra_safe
+            current_preprocessor = preprocessor_ultra_safe
+        elif len(df) > 5000:
+            logger.info(f"🚀 Using ULTRA-FAST (sequential) preprocessing for large dataset '{dataset_name}' ({len(df):,} records)")
+            logger.info("   This avoids all threading deadlocks by using sequential processing for all stages")
             from app.preprocessing import preprocessor_ultra_fast
             current_preprocessor = preprocessor_ultra_fast
         else:
@@ -1962,9 +1969,18 @@ async def _full_pipeline_background_task(dataset_name: str, request: FullPipelin
         logger.info(f"🚀 Starting background preprocessing of {len(df):,} records...")
         
         # Use optimized preprocessing based on dataset size
-        if len(df) > 10000:
-            logger.info(f"🚀 [BACKGROUND] Using ULTRA-FAST preprocessing for large dataset ({len(df):,} records)")
-            print(f"🚀 [BACKGROUND] Using ULTRA-FAST preprocessing for large dataset ({len(df):,} records)")
+        if dataset_name.lower() == "isot":
+            logger.info(f"🛡️  [BACKGROUND] Using ULTRA-SAFE preprocessing for ISOT dataset ({len(df):,} records)")
+            logger.info("   [BACKGROUND] This uses single-worker sequential processing to completely avoid threading deadlocks")
+            print(f"🛡️  [BACKGROUND] Using ULTRA-SAFE preprocessing for ISOT dataset ({len(df):,} records)")
+            print("   [BACKGROUND] This uses single-worker sequential processing to completely avoid threading deadlocks")
+            from app.preprocessing import preprocessor_ultra_safe
+            current_preprocessor = preprocessor_ultra_safe
+        elif len(df) > 5000:
+            logger.info(f"🚀 [BACKGROUND] Using ULTRA-FAST (sequential) preprocessing for large dataset '{dataset_name}' ({len(df):,} records)")
+            logger.info("   [BACKGROUND] This avoids all threading deadlocks by using sequential processing for all stages")
+            print(f"🚀 [BACKGROUND] Using ULTRA-FAST (sequential) preprocessing for large dataset '{dataset_name}' ({len(df):,} records)")
+            print("   [BACKGROUND] This avoids all threading deadlocks by using sequential processing for all stages")
             from app.preprocessing import preprocessor_ultra_fast
             current_preprocessor = preprocessor_ultra_fast
         else:
